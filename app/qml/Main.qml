@@ -4,7 +4,6 @@ import QtQuick.Controls.Material
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Dialogs
-import Qt.labs.platform as Platform
 
 ApplicationWindow {
     id: window
@@ -135,23 +134,23 @@ ApplicationWindow {
         }
     }
 
-    // ── File Dialogs (native via Qt.labs.platform + QApplication) ────────
-    Platform.FileDialog {
+    // ── File Dialogs ─────────────────────────────────────────────────────
+    FileDialog {
         id: csvDialog
         title:         "Export CSV"
-        fileMode:      Platform.FileDialog.SaveFile
+        fileMode:      FileDialog.SaveFile
         nameFilters:   ["CSV files (*.csv)", "All files (*)"]
         defaultSuffix: "csv"
-        onAccepted: backend.exportCsv(file)
+        onAccepted: backend.exportCsv(selectedFile)
     }
 
-    Platform.FileDialog {
+    FileDialog {
         id: xlsxDialog
         title:         "Export Excel"
-        fileMode:      Platform.FileDialog.SaveFile
+        fileMode:      FileDialog.SaveFile
         nameFilters:   ["Excel files (*.xlsx)", "All files (*)"]
         defaultSuffix: "xlsx"
-        onAccepted: backend.exportExcel(file)
+        onAccepted: backend.exportExcel(selectedFile)
     }
 
     // ── BLE device picker popup ───────────────────────────────────────────
