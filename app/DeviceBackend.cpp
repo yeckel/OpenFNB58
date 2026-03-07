@@ -16,6 +16,7 @@
 #  include <QBluetoothDeviceDiscoveryAgent>
 #  include <QBluetoothDeviceInfo>
 #endif
+#include <QProcess>
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 static double nowSecs() {
@@ -346,21 +347,51 @@ void DeviceBackend::scanBleDevices()
 #ifdef FNB58_HAVE_BLUETOOTH
     emit statusChanged("Scanning for BLE devices (5 s)…");
 
+    // ── Step 1: seed cache from system's known-device list ─────────────────
+    // QBluetoothDeviceDiscoveryAgent only finds devices that are actively
+    // advertising right now.  On Linux, "bluetoothctl devices" returns every
+    // device BlueZ has ever seen (paired, bonded, or just previously scanned).
+    // We pre-populate the cache so those devices are always selectable.
+#ifdef Q_OS_LINUX
+    QProcess btctl;
+    btctl.start("bluetoothctl", {"devices"});
+    if (btctl.waitForFinished(3000)) {
+        for (const QString& line :
+             QString(btctl.readAllStandardOutput()).split('\n', Qt::SkipEmptyParts)) {
+            // Format: "Device BA:03:18:7A:23:DF FNB58-038059"
+            const QStringList parts = line.trimmed().split(' ', Qt::SkipEmptyParts);
+            if (parts.size() >= 2 && parts[0] == "Device") {
+                const QString mac  = parts[1];
+                const QString name = parts.size() >= 3 ? parts.mid(2).join(' ') : mac;
+                if (!m_bleDeviceCache.contains(mac))
+                    m_bleDeviceCache.insert(
+                        mac, QBluetoothDeviceInfo(QBluetoothAddress(mac), name, 0));
+            }
+        }
+    }
+#endif
+
+    // ── Step 2: live 5-second BLE scan (updates names, finds new devices) ──
     auto* agent = new QBluetoothDeviceDiscoveryAgent(this);
     agent->setLowEnergyDiscoveryTimeout(5000);
 
     connect(agent, &QBluetoothDeviceDiscoveryAgent::finished,
             this, [this, agent]() {
-        QStringList result;
         for (const auto& info : agent->discoveredDevices()) {
             if (info.coreConfigurations()
-                    & QBluetoothDeviceInfo::LowEnergyCoreConfiguration) {
-                const QString mac  = info.address().toString();
-                const QString name = info.name().isEmpty() ? mac : info.name();
-                m_bleDeviceCache.insert(mac, info);
-                result << QString("%1 (%2)").arg(name, mac);
-            }
+                    & QBluetoothDeviceInfo::LowEnergyCoreConfiguration)
+                m_bleDeviceCache.insert(info.address().toString(), info);
         }
+
+        // Emit the full cache (known + just-scanned)
+        QStringList result;
+        for (auto it = m_bleDeviceCache.constBegin();
+             it != m_bleDeviceCache.constEnd(); ++it) {
+            const QString name = it.value().name().isEmpty() ? it.key()
+                                                             : it.value().name();
+            result << QString("%1 (%2)").arg(name, it.key());
+        }
+
         if (result.isEmpty())
             emit statusChanged("No BLE devices found. Make sure FNB58 is powered on.");
         else
@@ -371,8 +402,18 @@ void DeviceBackend::scanBleDevices()
 
     connect(agent, &QBluetoothDeviceDiscoveryAgent::errorOccurred,
             this, [this, agent](QBluetoothDeviceDiscoveryAgent::Error) {
-        emit statusChanged(QString("BLE scan error: %1").arg(agent->errorString()));
-        emit bleDevicesFound({});
+        // Scan failed, but still emit whatever we got from bluetoothctl
+        QStringList result;
+        for (auto it = m_bleDeviceCache.constBegin();
+             it != m_bleDeviceCache.constEnd(); ++it) {
+            const QString name = it.value().name().isEmpty() ? it.key()
+                                                             : it.value().name();
+            result << QString("%1 (%2)").arg(name, it.key());
+        }
+        emit statusChanged(result.isEmpty()
+            ? QString("BLE scan error: %1").arg(agent->errorString())
+            : QString("BLE scan error — showing %1 cached device(s)").arg(result.size()));
+        emit bleDevicesFound(result);
         agent->deleteLater();
     });
 
