@@ -75,13 +75,12 @@ ApplicationWindow {
             Label { text: "Window:"; opacity: 0.7 }
             ComboBox {
                 id: windowCombo
-                model: ["30 s", "60 s", "120 s", "300 s", "600 s"]
+                model: ["10 s", "30 s", "60 s", "120 s", "300 s", "600 s"]
                 width: 90
-                property var secs: [30, 60, 120, 300, 600]
-                currentIndex: 1
+                property var secs: [10, 30, 60, 120, 300, 600]
+                currentIndex: 2
                 onCurrentIndexChanged: {
-                    voltChart.windowSecs  = secs[currentIndex]
-                    powerChart.windowSecs = secs[currentIndex]
+                    window.sharedWindowSecs = secs[currentIndex]
                 }
             }
 
@@ -238,6 +237,10 @@ ApplicationWindow {
         }
     }
 
+    // ── Shared navigation state (zoom / pan, synced across both charts) ──
+    property real sharedViewLeft:    0
+    property real sharedWindowSecs:  60
+
     // ── Shared measurement range state ────────────────────────────────────
     QtObject {
         id: measurement
@@ -311,35 +314,48 @@ ApplicationWindow {
             // Voltage + Current (dual axis)
             LiveChart {
                 id: voltChart
-                SplitView.fillWidth:      true
+                SplitView.fillWidth:       true
                 SplitView.preferredHeight: parent.height * 0.4
-                title:     "Voltage / Current"
-                leftUnit:  "Voltage (V)"
-                rightUnit: "Current (A)"
-                followMode: followBtn.checked
+                title:                "Voltage / Current"
+                leftUnit:             "Voltage (V)"
+                rightUnit:            "Current (A)"
+                followMode:           followBtn.checked
+                effectiveWindowSecs:  window.sharedWindowSecs
+                viewLeft:             window.sharedViewLeft
                 seriesList: [
-                    { name: "VBUS",  color: "#58a6ff", data: [], yAxis: "left",  fillArea: false },
-                    { name: "D+",    color: "#3fb950", data: [], yAxis: "left",  fillArea: false },
-                    { name: "D−",    color: "#f78166", data: [], yAxis: "left",  fillArea: false },
-                    { name: "IBUS",  color: "#d2a8ff", data: [], yAxis: "right", fillArea: false }
+                    { name: "VBUS", color: "#58a6ff", data: [], yAxis: "left",  fillArea: false },
+                    { name: "D+",   color: "#3fb950", data: [], yAxis: "left",  fillArea: false },
+                    { name: "D−",   color: "#f78166", data: [], yAxis: "left",  fillArea: false },
+                    { name: "IBUS", color: "#d2a8ff", data: [], yAxis: "right", fillArea: false }
                 ]
                 onRangeSelected: (t0, t1) => measurement.update(t0, t1)
+                onViewChanged: (vl, ws) => {
+                    window.sharedViewLeft   = vl
+                    window.sharedWindowSecs = ws
+                    followBtn.checked = false
+                }
             }
 
-            // Power (single axis, area fill)
             LiveChart {
                 id: powerChart
-                SplitView.fillWidth:      true
-                SplitView.fillHeight:     true
-                title:    "Power"
-                leftUnit: "Power (W)"
-                followMode: followBtn.checked
+                SplitView.fillWidth:  true
+                SplitView.fillHeight: true
+                title:               "Power"
+                leftUnit:            "Power (W)"
+                followMode:          followBtn.checked
+                effectiveWindowSecs: window.sharedWindowSecs
+                viewLeft:            window.sharedViewLeft
                 seriesList: [
                     { name: "Power", color: "#ffa657",
                       data: [], yAxis: "left", fillArea: true,
                       fillColor: Qt.rgba(1, 0.65, 0.34, 0.15) }
                 ]
                 onRangeSelected: (t0, t1) => measurement.update(t0, t1)
+                onViewChanged: (vl, ws) => {
+                    window.sharedViewLeft   = vl
+                    window.sharedWindowSecs = ws
+                    followBtn.checked = false
+                }
             }
         }
 
