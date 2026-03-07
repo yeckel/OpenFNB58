@@ -39,6 +39,121 @@ DeviceBackend::~DeviceBackend()
     cleanupTransport();
 }
 
+// ── Protocol detection & trigger ──────────────────────────────────────────
+
+QList<DeviceBackend::ProtocolInfo> DeviceBackend::allProtocols()
+{
+    return {
+        { 1,  "QC 2.0 5V",    5000,  {5000} },
+        { 2,  "QC 2.0 9V",    9000,  {9000} },
+        { 3,  "QC 2.0 12V",  12000,  {12000} },
+        { 4,  "QC 2.0 20V",  20000,  {20000} },
+        { 5,  "QC 3.0",       9000,  {3600,4200,4600,5000,5400,6000,6500,7000,7500,8000,8500,9000,9500,10000,11000,12000,13000,14000,15000,16000,17000,18000,19000,20000} },
+        { 6,  "FCP/AFC 9V",   9000,  {9000} },
+        { 7,  "FCP/AFC 12V", 12000,  {12000} },
+        { 8,  "Huawei FCP",   9000,  {9000, 12000} },
+        { 9,  "Huawei SCP",   5000,  {4000,4500,5000,5500,6000,6500,7000,7500,8000} },
+        { 10, "Samsung 2A",   5000,  {5000} },
+        { 11, "Samsung AFC",  9000,  {9000, 12000} },
+        { 12, "Apple 2.1A",   5000,  {5000} },
+        { 13, "Apple 2.4A",   5000,  {5000} },
+        { 14, "PD / MTK",     9000,  {5000, 9000, 12000, 15000, 20000} },
+    };
+}
+
+QString DeviceBackend::inferProtocol(double dp, double dn, double vbus)
+{
+    auto near = [](double v, double t) { return qAbs(v - t) < 0.18; };
+
+    if (dp < 0.35 && dn < 0.35)
+        return QStringLiteral("USB SDP");
+
+    // Equal D+/D− (charger sets both lines to same voltage)
+    if (near(dp, dn)) {
+        if (near(dp, 2.0))                  return QStringLiteral("Apple 1A");
+        if (near(dp, 2.7) && near(dn, 2.0)) return QStringLiteral("Apple 2.1A");
+        if (near(dp, 2.0) && near(dn, 2.7)) return QStringLiteral("Apple 2.4A");
+        if (dp > 0.5 && dp < 1.8)           return QStringLiteral("DCP / Samsung");
+        if (dp >= 1.8 && dp < 2.3)          return QStringLiteral("Apple 1A");
+        return QString("DCP (%1V)").arg(dp, 0, 'f', 2);
+    }
+
+    // QC 2.0 codes
+    if (near(dp, 0.6) && dn < 0.35)         return QStringLiteral("QC 2.0 5V");
+    if (near(dp, 3.3) && near(dn, 0.6))     return QStringLiteral("QC 2.0 9V");
+    if (near(dp, 0.6) && near(dn, 0.6))     return QStringLiteral("QC 2.0 12V");
+    if (near(dp, 3.3) && near(dn, 3.3))     return QStringLiteral("QC 2.0 20V");
+    if (near(dp, 0.6) && dn > 0.0 && dn < 3.6)
+        return QStringLiteral("QC 3.0");
+
+    // Huawei FCP handshake
+    if (dp > 0.2 && dp < 0.45 && dn < 0.3) return QStringLiteral("Huawei FCP");
+
+    // USB PD (CC pins used, D+/D- idle but VBUS elevated)
+    if (vbus > 5.5)
+        return QString("USB PD (%1V)").arg(qRound(vbus));
+
+    return QString("Unknown (D+=%1V D-=%2V)").arg(dp, 0,'f',2).arg(dn, 0,'f',2);
+}
+
+void DeviceBackend::sendTrigger(int protoId, int voltage_mV)
+{
+    if (!m_transport) return;
+
+    // Build 64-byte trigger command with CRC-8
+    auto crc8 = [](const uint8_t* data, int len) -> uint8_t {
+        uint8_t crc = 0x42;
+        for (int i = 0; i < len; ++i) {
+            crc ^= data[i];
+            for (int b = 0; b < 8; ++b)
+                crc = (crc & 0x80) ? ((crc << 1) ^ 0x39) : (crc << 1);
+        }
+        return crc;
+    };
+
+    QByteArray cmd(64, '\0');
+    cmd[0] = static_cast<char>(0xAA);
+    cmd[1] = static_cast<char>(0x85);   // CMD_TRIGGER (best-guess)
+    cmd[2] = static_cast<char>(protoId);
+    int v10 = voltage_mV / 10;          // 10 mV resolution
+    cmd[3] = static_cast<char>(v10 & 0xFF);
+    cmd[4] = static_cast<char>((v10 >> 8) & 0xFF);
+    const uint8_t* inner = reinterpret_cast<const uint8_t*>(cmd.constData()) + 1;
+    cmd[63] = static_cast<char>(crc8(inner, 62));
+
+    QMetaObject::invokeMethod(m_transport, "sendCommand",
+                              Qt::QueuedConnection,
+                              Q_ARG(QByteArray, cmd));
+    emit statusChanged(QString("Trigger sent: proto %1 @ %2 V")
+                       .arg(protoId).arg(voltage_mV / 1000.0, 0, 'f', 1));
+}
+
+void DeviceBackend::releaseTrigger()
+{
+    if (!m_transport) return;
+
+    auto crc8 = [](const uint8_t* data, int len) -> uint8_t {
+        uint8_t crc = 0x42;
+        for (int i = 0; i < len; ++i) {
+            crc ^= data[i];
+            for (int b = 0; b < 8; ++b)
+                crc = (crc & 0x80) ? ((crc << 1) ^ 0x39) : (crc << 1);
+        }
+        return crc;
+    };
+
+    QByteArray cmd(64, '\0');
+    cmd[0] = static_cast<char>(0xAA);
+    cmd[1] = static_cast<char>(0x86);   // CMD_RELEASE (best-guess)
+    const uint8_t* inner = reinterpret_cast<const uint8_t*>(cmd.constData()) + 1;
+    cmd[63] = static_cast<char>(crc8(inner, 62));
+
+    QMetaObject::invokeMethod(m_transport, "sendCommand",
+                              Qt::QueuedConnection,
+                              Q_ARG(QByteArray, cmd));
+    emit statusChanged("Trigger released");
+}
+
 // ── Transport lifecycle ───────────────────────────────────────────────────
 void DeviceBackend::start(const QString& transport, const QString& address)
 {
@@ -126,6 +241,13 @@ void DeviceBackend::onReading(double vbus, double ibus, double power,
     rec.energyCum = m_energyWh;
 
     m_readings.append(rec);
+
+    // Protocol detection (update only if changed to avoid QML spam)
+    const QString proto = inferProtocol(dp, dn, vbus);
+    if (proto != m_protocolName) {
+        m_protocolName = proto;
+        emit protocolChanged(m_protocolName);
+    }
 
     emit newReading(t, vbus, ibus, power, dp, dn, temp);
     emit energyChanged(m_energyWh - m_energyBase);

@@ -122,6 +122,12 @@ void UsbTransport::decodeAndEmit(const char* buf)
     emit reading(vbus, ibus, vbus * ibus, dp, dn, temp);
 }
 
+void UsbTransport::sendCommand(const QByteArray& cmd)
+{
+    if (m_fd >= 0)
+        writeCmd(m_fd, cmd);
+}
+
 // ── Thread entry ─────────────────────────────────────────────────────────
 void UsbTransport::run()
 {
@@ -139,6 +145,7 @@ void UsbTransport::run()
 
     initDevice(fd);
     emit statusMessage("USB connected — streaming");
+    m_fd = fd;
 
     // Try a gentle restart if device was already in measurement mode
     // (drain + INIT2 only first)
@@ -189,6 +196,7 @@ void UsbTransport::run()
 
     exec(); // run event loop
 
+    m_fd = -1;
     delete notifier;
     delete pollTimer;
     delete stopTimer;

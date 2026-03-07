@@ -66,6 +66,67 @@ CMD_INIT1  = b"\xaa\x81" + b"\x00" * 61 + b"\x8e"
 CMD_INIT2  = b"\xaa\x82" + b"\x00" * 61 + b"\x96"
 CMD_POLL   = b"\xaa\x83" + b"\x00" * 61 + b"\x9e"
 
+# ── Protocol definitions ──────────────────────────────────────────────────
+# Matching the FNIRSI Windows app's protocol list.
+# Protocol IDs are used by the trigger command (cmd 0x85).
+# NOTE: The trigger command byte (0x85) and payload format are derived from
+#       reverse engineering; verify with a QC/PD-capable charger.
+PROTOCOLS = {
+    # id: (name, default_voltage_mv, [available_mv])
+     1: ("QC 2.0 5V",    5000,  [5000]),
+     2: ("QC 2.0 9V",    9000,  [9000]),
+     3: ("QC 2.0 12V",  12000,  [12000]),
+     4: ("QC 2.0 20V",  20000,  [20000]),
+     5: ("QC 3.0",       9000,  list(range(3600, 20001, 200))),
+     6: ("FCP/AFC 9V",   9000,  [9000]),
+     7: ("FCP/AFC 12V", 12000,  [12000]),
+     8: ("Huawei FCP",   9000,  [9000, 12000]),
+     9: ("Huawei SCP",   5000,  list(range(4000, 8001, 100))),
+    10: ("Samsung 2A",   5000,  [5000]),
+    11: ("Samsung AFC",  9000,  [9000, 12000]),
+    12: ("Apple 2.1A",   5000,  [5000]),
+    13: ("Apple 2.4A",   5000,  [5000]),
+    14: ("PD/MTK",       9000,  [5000, 9000, 12000, 15000, 20000]),
+}
+
+CMD_TRIGGER_BYTE = 0x85   # single trigger (best-guess; not officially documented)
+CMD_RELEASE_BYTE = 0x86   # release trigger (best-guess)
+
+
+def crc8_fnb58(data: bytes) -> int:
+    """
+    CRC-8 over the given bytes.
+    Parameters: poly=0x39, init=0x42, refin=False, refout=False, xorout=0x00.
+    For a 64-byte USB HID frame, pass bytes[1:63].
+    """
+    poly, crc = 0x39, 0x42
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            crc = ((crc << 1) ^ poly) & 0xFF if (crc & 0x80) else (crc << 1) & 0xFF
+    return crc
+
+
+def make_hid_cmd(cmd_byte: int, payload: bytes = b"") -> bytes:
+    """Build a 64-byte USB HID command with the correct CRC-8 checksum."""
+    inner = bytes([cmd_byte]) + bytes(payload) + bytes(61 - len(payload))
+    return bytes([0xAA]) + inner + bytes([crc8_fnb58(inner)])
+
+
+def make_trigger_cmd(proto_id: int, voltage_mv: int = 0) -> bytes:
+    """
+    Build a trigger command for the given protocol ID and target voltage.
+    voltage_mv is encoded as a LE uint16 in 10 mV units (e.g. 9000 mV → 0x0384).
+    """
+    v10 = voltage_mv // 10  # 10 mV resolution
+    payload = bytes([proto_id, v10 & 0xFF, (v10 >> 8) & 0xFF])
+    return make_hid_cmd(CMD_TRIGGER_BYTE, payload)
+
+
+def make_release_cmd() -> bytes:
+    """Build the trigger release command."""
+    return make_hid_cmd(CMD_RELEASE_BYTE)
+
 
 def find_hidraw(wait: float = 10.0) -> str:
     """
@@ -144,6 +205,65 @@ def hid_drain(fd: int, max_packets: int = 200):
             break
 
 
+def infer_protocol(dp: float, dn: float, vbus: float = 5.0) -> str:
+    """
+    Infer the charging protocol from D+/D- voltages measured by the FNB58.
+    These voltages reflect what the charger (upstream side) is asserting.
+
+    Returns a short protocol name string.
+    """
+    tol = 0.18  # ±180 mV tolerance
+
+    def near(v, target):
+        return abs(v - target) < tol
+
+    def near2(v1, t1, v2, t2):
+        return near(v1, t1) and near(v2, t2)
+
+    # No voltage on either line → SDP or no charger detected
+    if dp < 0.35 and dn < 0.35:
+        return "USB SDP"
+
+    # Both lines equal and low → BC 1.2 DCP / Samsung-style charger
+    if near(dp, dn) and 0.5 < dp < 2.5:
+        if near2(dp, 2.0, dn, 2.0):
+            return "Apple 1A"
+        if near2(dp, 2.7, dn, 2.0):
+            return "Apple 2.1A"
+        if near2(dp, 2.0, dn, 2.7):
+            return "Apple 2.4A"
+        if 1.0 < dp < 1.8:
+            return "DCP / Samsung"
+        if 1.8 < dp < 2.3:
+            return "Apple 1A"
+        return f"DCP ({dp:.2f}V)"
+
+    # QC 2.0 voltage codes (D+, D-)
+    if near2(dp, 0.6, dn, 0.0):
+        return "QC 2.0 5V"
+    if near2(dp, 3.3, dn, 0.6):
+        return "QC 2.0 9V"
+    if near2(dp, 0.6, dn, 0.6):
+        return "QC 2.0 12V / CDP"
+    if near2(dp, 3.3, dn, 3.3):
+        return "QC 2.0 20V"
+    # QC 3.0 continuous mode: D+ = 0.6 V, D- toggling
+    if near(dp, 0.6) and 0.0 < dn < 3.6:
+        return "QC 3.0"
+
+    # Huawei FCP: D+ ≈ 0.325 V used as handshake initiation signal
+    if 0.2 < dp < 0.45 and dn < 0.3:
+        return "Huawei FCP"
+
+    # If VBUS is elevated but D+/D- still show 5V pattern → USB PD (CC pins used)
+    if vbus > 5.5 and dp < 0.5 and dn < 0.5:
+        return f"USB PD ({vbus:.0f}V)"
+    if vbus > 5.5:
+        return f"Fast Charge ({vbus:.0f}V)"
+
+    return f"Unknown (D+={dp:.2f}V D-={dn:.2f}V)"
+
+
 def decode_packet(data):
     """Decode a 64-byte data packet into a list of sample dicts."""
     if data[0] != 0xAA or data[1] != 0x04:
@@ -165,6 +285,7 @@ def decode_packet(data):
             "dp_V":      dp,
             "dn_V":      dn,
             "temp_C":    temp,
+            "protocol":  infer_protocol(dp, dn, voltage),
         })
     return samples
 
@@ -234,9 +355,9 @@ def run_monitor(fd: int, interval=1.0, count=None):
         print("Failed to initialize device.", file=sys.stderr)
         sys.exit(1)
 
-    print(f"{'Time':>10}  {'Voltage':>9}  {'Current':>9}  {'Power':>8}  {'D+':>6}  {'D-':>6}  {'Temp':>7}")
+    print(f"{'Time':>10}  {'Voltage':>9}  {'Current':>9}  {'Power':>8}  {'D+':>6}  {'D-':>6}  {'Temp':>7}  Protocol")
     print(f"{'(s)':>10}  {'(V)':>9}  {'(A)':>9}  {'(W)':>8}  {'(V)':>6}  {'(V)':>6}  {'(°C)':>7}")
-    print("-" * 72)
+    print("-" * 90)
 
     next_poll = time.time() + interval
     start = time.time()
@@ -262,12 +383,42 @@ def run_monitor(fd: int, interval=1.0, count=None):
             print(
                 f"{t:10.2f}  {s['voltage_V']:9.5f}  {s['current_A']:9.5f}"
                 f"  {s['power_W']:8.5f}  {s['dp_V']:6.3f}  {s['dn_V']:6.3f}  {s['temp_C']:7.1f}"
+                f"  {s['protocol']}"
             )
             sys.stdout.flush()
             n += 1
 
     except KeyboardInterrupt:
         print("\nStopped.", file=sys.stderr)
+
+
+def trigger(fd: int, proto_id: int, voltage_mv: int = 0, hold_secs: float = 3.0):
+    """
+    Send a single trigger command to the FNB58 to negotiate a fast-charge protocol.
+
+    proto_id    : protocol ID (1–14, see PROTOCOLS dict)
+    voltage_mv  : target voltage in millivolts (0 = use protocol default)
+    hold_secs   : seconds to hold the trigger before releasing (0 = no release)
+
+    NOTE: Trigger command bytes are reverse-engineered / best-guess.
+          Test with a QC/PD-capable charger and report results.
+    """
+    proto = PROTOCOLS.get(proto_id)
+    if proto is None:
+        print(f"Unknown protocol ID {proto_id}. Valid IDs: {list(PROTOCOLS.keys())}", file=sys.stderr)
+        sys.exit(1)
+
+    name, default_mv, _ = proto
+    if voltage_mv == 0:
+        voltage_mv = default_mv
+
+    print(f"Triggering: {name} @ {voltage_mv/1000:.1f} V (proto_id={proto_id})", file=sys.stderr)
+    hid_write(fd, make_trigger_cmd(proto_id, voltage_mv))
+
+    if hold_secs > 0:
+        time.sleep(hold_secs)
+        hid_write(fd, make_release_cmd())
+        print("Trigger released.", file=sys.stderr)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -532,6 +683,21 @@ def main():
         "--interval", type=float, default=1.0,
         help="Poll interval in seconds"
     )
+    parser.add_argument(
+        "--trigger", type=int, default=None, metavar="PROTO_ID",
+        help=(
+            "Send a fast-charge trigger and release it after --hold seconds. "
+            "PROTO_ID: " + ", ".join(f"{k}={v[0]}" for k,v in PROTOCOLS.items())
+        )
+    )
+    parser.add_argument(
+        "--voltage", type=float, default=0,
+        help="Trigger target voltage in V (0 = protocol default)"
+    )
+    parser.add_argument(
+        "--hold", type=float, default=3.0,
+        help="Seconds to hold the trigger before releasing (0 = no release)"
+    )
     args = parser.parse_args()
 
     # ── BLE mode ──
@@ -539,11 +705,15 @@ def main():
         if args.once:
             s = ble_read_once(args.mac)
             if s:
-                print(f"VBUS   : {s.get('vbus_V', float('nan')):.3f} V")
-                print(f"IBUS   : {s.get('ibus_A', float('nan')):.3f} A")
-                print(f"Power  : {s.get('power_W', float('nan')):.5f} W")
-                print(f"D+     : {s.get('dp_V', float('nan')):.3f} V")
-                print(f"D-     : {s.get('dn_V', float('nan')):.3f} V")
+                dp  = s.get('dp_V', float('nan'))
+                dn  = s.get('dn_V', float('nan'))
+                vbs = s.get('vbus_V', float('nan'))
+                print(f"VBUS     : {vbs:.3f} V")
+                print(f"IBUS     : {s.get('ibus_A', float('nan')):.3f} A")
+                print(f"Power    : {s.get('power_W', float('nan')):.5f} W")
+                print(f"D+       : {dp:.3f} V")
+                print(f"D-       : {dn:.3f} V")
+                print(f"Protocol : {infer_protocol(dp, dn, vbs)}")
             else:
                 print("No BLE data received.", file=sys.stderr)
                 sys.exit(1)
@@ -556,7 +726,11 @@ def main():
     fd = open_hid(path)
 
     try:
-        if args.once:
+        if args.trigger is not None:
+            # Ensure device is streaming first
+            read_once(fd)
+            trigger(fd, args.trigger, int(args.voltage * 1000), args.hold)
+        elif args.once:
             samples = read_once(fd)
             if samples is None:
                 # Device may be mid-reboot; wait for it to come back and retry
@@ -566,12 +740,13 @@ def main():
                 samples = read_once(fd)
             if samples:
                 s = samples[0]
-                print(f"VBUS   : {s['voltage_V']:.5f} V")
-                print(f"IBUS   : {s['current_A']:.5f} A")
-                print(f"Power  : {s['power_W']:.5f} W")
-                print(f"D+     : {s['dp_V']:.3f} V")
-                print(f"D-     : {s['dn_V']:.3f} V")
-                print(f"Temp   : {s['temp_C']:.1f} °C")
+                print(f"VBUS     : {s['voltage_V']:.5f} V")
+                print(f"IBUS     : {s['current_A']:.5f} A")
+                print(f"Power    : {s['power_W']:.5f} W")
+                print(f"D+       : {s['dp_V']:.3f} V")
+                print(f"D-       : {s['dn_V']:.3f} V")
+                print(f"Temp     : {s['temp_C']:.1f} °C")
+                print(f"Protocol : {s['protocol']}")
             else:
                 print("No data received.", file=sys.stderr)
                 sys.exit(1)

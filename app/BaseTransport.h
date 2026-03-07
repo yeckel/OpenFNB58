@@ -14,6 +14,10 @@ public:
     // Thread-safe; may be called from any thread.
     virtual void requestStop() = 0;
 
+public slots:
+    // Invoked in transport thread (Qt::QueuedConnection) to write raw command.
+    virtual void sendCommand(const QByteArray& /*cmd*/) {}
+
 signals:
     // vbus/ibus/power in V/A/W; dp/dn/temp may be NaN for BLE
     void reading(double vbus, double ibus, double power,

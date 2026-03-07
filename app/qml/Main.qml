@@ -108,6 +108,15 @@ ApplicationWindow {
                 ToolTip.visible: hovered
             }
 
+            // Fast-charge trigger (experimental)
+            Button {
+                text: "⚡ Trigger"
+                enabled: backend.running
+                ToolTip.text: "Send fast-charge protocol trigger (experimental)"
+                ToolTip.visible: hovered
+                onClicked: triggerPopup.open()
+            }
+
             Item { Layout.fillWidth: true }
 
             // CSV export
@@ -300,6 +309,22 @@ ApplicationWindow {
                             font.bold: true
                             color: modelData.clr
                         }
+                    }
+                }
+
+                // Protocol badge
+                ColumnLayout {
+                    spacing: 2
+                    Label {
+                        text: "Protocol"
+                        font.pixelSize: 11
+                        opacity: 0.6
+                    }
+                    Label {
+                        text: live.protocol || "—"
+                        font.pixelSize: 18
+                        font.bold: true
+                        color: "#79c0ff"
                     }
                 }
             }
@@ -513,12 +538,13 @@ ApplicationWindow {
     // ── Readout model — live values updated by backend ────────────────────
     QtObject {
         id: live
-        property real vbus:  0.0
-        property real ibus:  0.0
-        property real power: 0.0
-        property real dp:    0.0
-        property real dn:    0.0
-        property real temp:  NaN
+        property real   vbus:     0.0
+        property real   ibus:     0.0
+        property real   power:    0.0
+        property real   dp:       0.0
+        property real   dn:       0.0
+        property real   temp:     NaN
+        property string protocol: ""
     }
 
     // ── Backend connections ───────────────────────────────────────────────
@@ -555,6 +581,10 @@ ApplicationWindow {
 
         function onRunningChanged() {
             if (backend.running) statusLabel.color = Material.foreground
+        }
+
+        function onProtocolChanged(name) {
+            live.protocol = name
         }
     }
 
@@ -602,6 +632,103 @@ ApplicationWindow {
             errorPopup.message = msg
             errorPopup.open()
             toastTimer.restart()
+        }
+    }
+
+    // ── Fast-charge trigger popup (experimental) ─────────────────────────
+    Popup {
+        id: triggerPopup
+        x: (parent.width  - width)  / 2
+        y: (parent.height - height) / 2
+        width: 360
+        modal: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        background: Rectangle {
+            color: "#1a1f2e"
+            radius: 8
+            border { color: "#445"; width: 1 }
+        }
+
+        // Protocol id list mirroring DeviceBackend::allProtocols()
+        property var protos: [
+            { id: 1,  name: "QC 2.0 5V",    defV: 5000,  vols: [5000] },
+            { id: 2,  name: "QC 2.0 9V",    defV: 9000,  vols: [9000] },
+            { id: 3,  name: "QC 2.0 12V",   defV: 12000, vols: [12000] },
+            { id: 4,  name: "QC 2.0 20V",   defV: 20000, vols: [20000] },
+            { id: 5,  name: "QC 3.0",        defV: 9000,  vols: [5000,9000,12000,20000] },
+            { id: 6,  name: "FCP/AFC 9V",    defV: 9000,  vols: [9000] },
+            { id: 7,  name: "FCP/AFC 12V",   defV: 12000, vols: [12000] },
+            { id: 8,  name: "Huawei FCP",    defV: 9000,  vols: [9000,12000] },
+            { id: 9,  name: "Huawei SCP",    defV: 5000,  vols: [4000,4500,5000,5500,6000,6500,7000,7500,8000] },
+            { id: 10, name: "Samsung 2A",    defV: 5000,  vols: [5000] },
+            { id: 11, name: "Samsung AFC",   defV: 9000,  vols: [9000,12000] },
+            { id: 12, name: "Apple 2.1A",    defV: 5000,  vols: [5000] },
+            { id: 13, name: "Apple 2.4A",    defV: 5000,  vols: [5000] },
+            { id: 14, name: "PD / MTK",      defV: 9000,  vols: [5000,9000,12000,15000,20000] }
+        ]
+
+        ColumnLayout {
+            anchors { fill: parent; margins: 16 }
+            spacing: 10
+
+            Label {
+                text: "⚡ Fast-Charge Trigger"
+                font { pixelSize: 15; bold: true }
+                color: "#ffa657"
+            }
+            Label {
+                text: "⚠ Experimental — trigger commands are best-guess.\nOnly use if you understand the risks."
+                font.pixelSize: 11
+                color: "#e3b341"
+                wrapMode: Text.Wrap
+                Layout.fillWidth: true
+            }
+
+            Label { text: "Protocol"; font.pixelSize: 11; opacity: 0.7 }
+            ComboBox {
+                id: protoCombo
+                Layout.fillWidth: true
+                model: triggerPopup.protos.map(function(p){ return p.name })
+                onCurrentIndexChanged: {
+                    var p = triggerPopup.protos[currentIndex]
+                    voltCombo.model = p.vols.map(function(v){ return (v/1000).toFixed(1)+" V" })
+                    voltCombo.currentIndex = 0
+                }
+            }
+
+            Label { text: "Target voltage"; font.pixelSize: 11; opacity: 0.7 }
+            ComboBox {
+                id: voltCombo
+                Layout.fillWidth: true
+                model: triggerPopup.protos[0].vols.map(function(v){ return (v/1000).toFixed(1)+" V" })
+            }
+
+            RowLayout {
+                spacing: 8
+                Button {
+                    text: "⚡ Trigger"
+                    Material.accent: Material.Orange
+                    highlighted: true
+                    onClicked: {
+                        var p   = triggerPopup.protos[protoCombo.currentIndex]
+                        var mV  = p.vols[voltCombo.currentIndex]
+                        backend.sendTrigger(p.id, mV)
+                        triggerPopup.close()
+                    }
+                }
+                Button {
+                    text: "↺ Release"
+                    onClicked: {
+                        backend.releaseTrigger()
+                        triggerPopup.close()
+                    }
+                }
+                Button {
+                    text: "Cancel"
+                    flat: true
+                    onClicked: triggerPopup.close()
+                }
+            }
         }
     }
 }
