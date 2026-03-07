@@ -3,7 +3,23 @@
 Open-source tools for the **FNIRSI FNB58** USB power meter / charger tester.
 
 Includes a Python CLI reader and a Qt 6 / QML desktop application with live charts,
-range measurement, and CSV/Excel export.
+range measurement, protocol detection, fast-charge trigger, and CSV/Excel export.
+
+---
+
+## Screenshots
+
+**Idle — ready to connect**
+![Idle state](docs/screenshots/01_idle.png)
+
+**Live streaming — USB SDP detected, real-time voltage/current/temperature**
+![Running with live data](docs/screenshots/02_running.png)
+
+**⚡ Fast-charge trigger popup — select protocol and target voltage**
+![Trigger popup](docs/screenshots/03_trigger.png)
+
+**📐 Range measurement — drag to select, stats panel slides up**
+![Measurement panel](docs/screenshots/04_measurement.png)
 
 ---
 
@@ -11,16 +27,20 @@ range measurement, and CSV/Excel export.
 
 ### Python CLI (`fnb58.py`)
 - Reads live measurements over **USB HID** (`/dev/hidraw*`) or **Bluetooth LE**
-- Reports VBUS, IBUS, Power, D+, D−, Temperature
+- Reports VBUS, IBUS, Power, D+, D−, Temperature, **detected protocol**
+- Fast-charge trigger: `--trigger PROTO_ID --voltage V` (experimental)
 - No root required — uses `/dev/hidraw*` (world-accessible) and unprivileged D-Bus BLE
 - Modes: single shot, continuous, with configurable interval
 
 ### Qt/QML GUI (`app/`)
 - **Live scrolling charts** — Voltage/Current (dual axis) + Power (area fill)
-- **Live readout bar** — VBUS, IBUS, Power, D+, D−, Temperature
+- **Live readout bar** — VBUS, IBUS, Power, D+, D−, Temperature, **Protocol badge**
+- **Protocol detection** — identifies USB SDP/DCP, QC 2.0/3.0, Apple, Samsung, Huawei FCP, USB PD from D+/D− voltages
+- **Fast-charge trigger** — ⚡ Trigger button sends QC/FCP/SCP/PD trigger commands (experimental)
 - **USB and BLE transport** — auto-discovery for USB; scan + pick for BLE
 - **Range measurement** — click-drag on any chart to select a time window; shows energy (Wh/mWh/mAh), mean & peak V/I/P, temperature min/max
 - **Energy marker** — reset the Wh accumulator mid-session to measure a charging phase
+- **Zoom & pan** — scroll wheel to zoom in/out, right-click drag to pan both charts
 - **Export** — native file dialog, CSV and Excel (.xlsx) output
 - Dark Material theme, configurable time window, follow mode
 
@@ -128,6 +148,9 @@ python3 fnb58.py --ble
 
 # BLE with explicit MAC
 python3 fnb58.py --ble --mac BA:03:18:7A:23:DF
+
+# Send QC 2.0 9V trigger, hold 3 s, then release (proto id 2 = QC 2.0 9V)
+python3 fnb58.py --trigger 2 --voltage 9 --hold 3
 ```
 
 ### Qt GUI
