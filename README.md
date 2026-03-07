@@ -202,4 +202,4 @@ OpenFNB58/
 
 ## License
 
-MIT
+[GNU General Public License v3.0](LICENSE) — see `LICENSE` for full terms.
