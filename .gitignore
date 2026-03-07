@@ -1,0 +1,23 @@
+# Build output
+app/build/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Qt Creator
+*.pro.user
+*.qmlproject.user
+CMakeLists.txt.user
+
+# OS
+.DS_Store
+Thumbs.db
