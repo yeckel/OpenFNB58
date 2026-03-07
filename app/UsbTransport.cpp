@@ -9,10 +9,12 @@
 #include <QElapsedTimer>
 #include <QDebug>
 
+#ifdef Q_OS_LINUX
 #include <fcntl.h>
 #include <unistd.h>
 #include <cerrno>
 #include <cstring>
+#endif
 
 // ── Protocol constants ────────────────────────────────────────────────────
 static QByteArray makeCmd(uint8_t b1, uint8_t b2, uint8_t chk)
@@ -41,7 +43,9 @@ void UsbTransport::requestStop()
     quit(); // stop exec() event loop
 }
 
-// ── Sysfs discovery ───────────────────────────────────────────────────────
+// ── Sysfs discovery (Linux only) ─────────────────────────────────────────
+#ifdef Q_OS_LINUX
+
 QString UsbTransport::findHidraw()
 {
     const QString vid = "2e3c", pid = "5558";
@@ -202,3 +206,15 @@ void UsbTransport::run()
     delete stopTimer;
     ::close(fd);
 }
+
+#else  // !Q_OS_LINUX ─────────────────────────────────────────────────────
+
+void UsbTransport::sendCommand(const QByteArray&) {}
+
+void UsbTransport::run()
+{
+    emit error("USB HID transport requires Linux (hidraw). "
+               "Please run on a Linux system.");
+}
+
+#endif // Q_OS_LINUX

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=OpenFNB58
+Comment=FNIRSI FNB58 USB power meter monitor
+Exec=fnb58app
+Icon=fnb58app
+Type=Application
+Categories=Utility;Electronics;
+Keywords=USB;power;meter;FNB58;FNIRSI;charger;tester;

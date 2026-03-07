@@ -329,6 +329,7 @@ QVariantMap DeviceBackend::measureRange(double tStart, double tEnd) const
 // ── BLE device scan ───────────────────────────────────────────────────────
 void DeviceBackend::scanBleDevices()
 {
+#ifdef Q_OS_LINUX
     emit statusChanged("Scanning for paired BLE devices…");
     QProcess proc;
     proc.start("bluetoothctl", {"devices", "Paired"});
@@ -352,6 +353,10 @@ void DeviceBackend::scanBleDevices()
         emit statusChanged(QString("Found %1 paired device(s)").arg(result.size()));
 
     emit bleDevicesFound(result);
+#else
+    emit statusChanged("BLE scan requires Linux (BlueZ). Not available on this platform.");
+    emit bleDevicesFound({});
+#endif
 }
 
 // ── Reset energy marker ───────────────────────────────────────────────────

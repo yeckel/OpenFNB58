@@ -1,20 +1,6 @@
 #include "BleTransport.h"
 
-#include <QDBusConnection>
-#include <QDBusInterface>
-#include <QDBusMessage>
-#include <QDBusArgument>
-#include <QDBusObjectPath>
-#include <QDBusVariant>
-#include <QDBusReply>
-#include <QProcess>
-#include <QTimer>
-#include <QDebug>
-
-#include <limits>
-#include <cstdint>
-
-// ── Static constants ──────────────────────────────────────────────────────
+// ── Static constants (always defined) ─────────────────────────────────────
 const QByteArray BleTransport::BLE_INIT1 = QByteArray::fromHex("aa8100f4");
 const QByteArray BleTransport::BLE_INIT2 = QByteArray::fromHex("aa8200a7");
 constexpr int BleTransport::PKT_LENS[9];
@@ -28,6 +14,22 @@ void BleTransport::requestStop()
     m_stop.store(true, std::memory_order_relaxed);
     quit();
 }
+
+#ifdef FNB58_HAVE_DBUS
+
+#include <QDBusConnection>
+#include <QDBusInterface>
+#include <QDBusMessage>
+#include <QDBusArgument>
+#include <QDBusObjectPath>
+#include <QDBusVariant>
+#include <QDBusReply>
+#include <QProcess>
+#include <QTimer>
+#include <QDebug>
+
+#include <limits>
+#include <cstdint>
 
 // ── Connect device via bluetoothctl ──────────────────────────────────────
 bool BleTransport::ensureConnected()
@@ -251,3 +253,15 @@ void BleTransport::run()
     delete initTimer;
     delete stopTimer;
 }
+
+#else  // !FNB58_HAVE_DBUS ─────────────────────────────────────────────────
+
+void BleTransport::onPropertiesChanged(const QString&, const QVariantMap&, const QStringList&) {}
+
+void BleTransport::run()
+{
+    emit error("BLE transport requires Linux with BlueZ (D-Bus). "
+               "Please run on a Linux system.");
+}
+
+#endif // FNB58_HAVE_DBUS

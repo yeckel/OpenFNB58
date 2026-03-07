@@ -5,13 +5,15 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
-# ── Qt 6.9 from /opt ───────────────────────────────────────────────────────
-set(CMAKE_PREFIX_PATH "/opt/Qt/6.9.2/gcc_64")
+# ── Qt location: prefer /opt/Qt local install if present ──────────────────
+if(EXISTS "/opt/Qt/6.9.2/gcc_64" AND NOT DEFINED CMAKE_PREFIX_PATH)
+    list(APPEND CMAKE_PREFIX_PATH "/opt/Qt/6.9.2/gcc_64")
+endif()
 
-find_package(Qt6 6.9 REQUIRED COMPONENTS
-    Core Gui Quick QuickControls2 Qml DBus QuickDialogs2 Widgets)
+find_package(Qt6 6.7 REQUIRED COMPONENTS
+    Core Gui Quick QuickControls2 Qml QuickDialogs2 Widgets)
 
-qt_standard_project_setup(REQUIRES 6.9)
+qt_standard_project_setup(REQUIRES 6.7)
 
 # Put the executable in bin/ to avoid conflict with the QML module directory
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
@@ -42,13 +44,32 @@ target_link_libraries(fnb58app PRIVATE
     Qt6::Quick
     Qt6::QuickControls2
     Qt6::Qml
-    Qt6::DBus
     Qt6::QuickDialogs2
     Qt6::Widgets
 )
 
-# ── RPATH so the binary finds /opt/Qt libs at runtime ─────────────────────
-set_target_properties(fnb58app PROPERTIES
-    BUILD_RPATH  "/opt/Qt/6.9.2/gcc_64/lib"
-    INSTALL_RPATH "/opt/Qt/6.9.2/gcc_64/lib"
-)
+# ── DBus (BlueZ BLE) — Linux only ─────────────────────────────────────────
+if(UNIX AND NOT APPLE)
+    find_package(Qt6 REQUIRED COMPONENTS DBus)
+    target_link_libraries(fnb58app PRIVATE Qt6::DBus)
+    target_compile_definitions(fnb58app PRIVATE FNB58_HAVE_DBUS)
+endif()
+
+# ── macOS bundle ──────────────────────────────────────────────────────────
+if(APPLE)
+    set_target_properties(fnb58app PROPERTIES
+        MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_BUNDLE_NAME        "OpenFNB58"
+        MACOSX_BUNDLE_BUNDLE_VERSION     "1.0"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "1.0"
+        MACOSX_BUNDLE_GUI_IDENTIFIER     "cz.yeckel.openfnb58"
+    )
+endif()
+
+# ── RPATH (local dev only) ─────────────────────────────────────────────────
+if(EXISTS "/opt/Qt/6.9.2/gcc_64")
+    set_target_properties(fnb58app PROPERTIES
+        BUILD_RPATH   "/opt/Qt/6.9.2/gcc_64/lib"
+        INSTALL_RPATH "/opt/Qt/6.9.2/gcc_64/lib"
+    )
+endif()

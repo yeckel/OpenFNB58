@@ -1,0 +1,156 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+env:
+  QT_VERSION: '6.8.3'
+
+jobs:
+  # ── Linux ─────────────────────────────────────────────────────────────────
+  build-linux:
+    name: Linux (AppImage)
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y \
+            libgl1-mesa-dev libdbus-1-dev ninja-build libfuse2 \
+            libglib2.0-dev libpulse-dev
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          modules: ''
+
+      - name: Build
+        run: |
+          cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release app/
+          cmake --build build --parallel
+
+      - name: Download linuxdeploy
+        run: |
+          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+          chmod +x linuxdeploy-x86_64.AppImage linuxdeploy-plugin-qt-x86_64.AppImage
+
+      - name: Create AppImage
+        env:
+          OUTPUT: OpenFNB58-linux-x86_64.AppImage
+          QMAKE: qmake6
+        run: |
+          mkdir -p AppDir/usr/bin AppDir/usr/share/icons/hicolor/256x256/apps
+          cp build/bin/fnb58app   AppDir/usr/bin/
+          cp app/fnb58app.png     AppDir/usr/share/icons/hicolor/256x256/apps/fnb58app.png
+          ./linuxdeploy-x86_64.AppImage \
+            --appdir AppDir \
+            --desktop-file app/fnb58app.desktop \
+            --icon-file app/fnb58app.png \
+            --plugin qt \
+            --output appimage
+          mv OpenFNB58*.AppImage OpenFNB58-linux-x86_64.AppImage
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage
+          path: OpenFNB58-linux-x86_64.AppImage
+
+  # ── Windows ───────────────────────────────────────────────────────────────
+  build-windows:
+    name: Windows (zip)
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: win64_msvc2022_64
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Build
+        run: |
+          cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release app/
+          cmake --build build --parallel
+
+      - name: Deploy with windeployqt
+        shell: cmd
+        run: |
+          mkdir deploy
+          copy build\bin\fnb58app.exe deploy\
+          windeployqt --release --qmldir app\qml deploy\fnb58app.exe
+
+      - name: Package as zip
+        shell: powershell
+        run: Compress-Archive -Path deploy\* -DestinationPath OpenFNB58-windows-x86_64.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-zip
+          path: OpenFNB58-windows-x86_64.zip
+
+  # ── macOS ─────────────────────────────────────────────────────────────────
+  build-macos:
+    name: macOS (dmg)
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+
+      - name: Build
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release app/
+          cmake --build build --parallel
+
+      - name: Deploy with macdeployqt
+        run: |
+          macdeployqt build/bin/fnb58app.app -qmldir=app/qml -dmg
+          mv build/bin/fnb58app.dmg OpenFNB58-macos.dmg
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: OpenFNB58-macos.dmg
+
+  # ── GitHub Release (on version tags) ──────────────────────────────────────
+  release:
+    name: Create Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-linux, build-windows, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            OpenFNB58-linux-x86_64.AppImage
+            OpenFNB58-windows-x86_64.zip
+            OpenFNB58-macos.dmg
