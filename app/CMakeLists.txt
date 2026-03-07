@@ -12,6 +12,7 @@ endif()
 
 find_package(Qt6 6.7 REQUIRED COMPONENTS
     Core Gui Quick QuickControls2 Qml QuickDialogs2 Widgets)
+find_package(Qt6 OPTIONAL_COMPONENTS Bluetooth)
 
 qt_standard_project_setup(REQUIRES 6.7)
 
@@ -48,11 +49,32 @@ target_link_libraries(fnb58app PRIVATE
     Qt6::Widgets
 )
 
-# ── DBus (BlueZ BLE) — Linux only ─────────────────────────────────────────
+if(Qt6Bluetooth_FOUND)
+    target_link_libraries(fnb58app PRIVATE Qt6::Bluetooth)
+    target_compile_definitions(fnb58app PRIVATE FNB58_HAVE_BLUETOOTH)
+else()
+    message(WARNING "Qt6::Bluetooth not found — BLE transport will be disabled. "
+                    "Install qtconnectivity to enable BLE support.")
+endif()
+
+# ── hidapi (cross-platform HID access) ────────────────────────────────────
+if(WIN32)
+    find_package(hidapi CONFIG REQUIRED)
+    target_link_libraries(fnb58app PRIVATE hidapi::hidapi)
+else()
+    find_package(PkgConfig REQUIRED)
+    if(APPLE)
+        pkg_check_modules(HIDAPI REQUIRED IMPORTED_TARGET hidapi)
+    else()  # Linux
+        pkg_check_modules(HIDAPI REQUIRED IMPORTED_TARGET hidapi-hidraw)
+    endif()
+    target_link_libraries(fnb58app PRIVATE PkgConfig::HIDAPI)
+endif()
+
+# ── DBus — Qt Bluetooth on Linux needs it transitively; keep it explicit ──
 if(UNIX AND NOT APPLE)
     find_package(Qt6 REQUIRED COMPONENTS DBus)
     target_link_libraries(fnb58app PRIVATE Qt6::DBus)
-    target_compile_definitions(fnb58app PRIVATE FNB58_HAVE_DBUS)
 endif()
 
 # ── macOS bundle ──────────────────────────────────────────────────────────

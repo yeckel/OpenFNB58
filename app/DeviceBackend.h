@@ -6,6 +6,12 @@
 #include <QVector>
 #include <QTimer>
 #include <QString>
+#include <QVariantMap>
+
+#ifdef FNB58_HAVE_BLUETOOTH
+#  include <QMap>
+#  include <QBluetoothDeviceInfo>
+#endif
 
 class DeviceBackend : public QObject
 {
@@ -82,4 +88,7 @@ private:
 
     BaseTransport* m_transport     = nullptr;
     QTimer*        m_durationTimer = nullptr;
+#ifdef FNB58_HAVE_BLUETOOTH
+    QMap<QString, QBluetoothDeviceInfo> m_bleDeviceCache;
+#endif
 };

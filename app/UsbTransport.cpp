@@ -1,32 +1,15 @@
 #include "UsbTransport.h"
 
-#include <QDir>
-#include <QFile>
-#include <QFileInfo>
-#include <QTimer>
-#include <QSocketNotifier>
-#include <QEventLoop>
+#include <hidapi/hidapi.h>
+#include <QThread>
 #include <QElapsedTimer>
+#include <QMutexLocker>
 #include <QDebug>
 
-#ifdef Q_OS_LINUX
-#include <fcntl.h>
-#include <unistd.h>
-#include <cerrno>
 #include <cstring>
-#endif
+#include <cstdint>
 
 // ── Protocol constants ────────────────────────────────────────────────────
-static QByteArray makeCmd(uint8_t b1, uint8_t b2, uint8_t chk)
-{
-    QByteArray cmd(64, '\0');
-    cmd[0] = static_cast<char>(0xAA);
-    cmd[1] = static_cast<char>(b2);
-    cmd[63] = static_cast<char>(chk);
-    (void)b1; // aa prefix is always 0xAA above
-    return cmd;
-}
-
 const QByteArray UsbTransport::CMD_INIT1 = [](){
     QByteArray c(64, '\0'); c[0]=char(0xAA); c[1]=char(0x81); c[63]=char(0x8E); return c; }();
 const QByteArray UsbTransport::CMD_INIT2 = [](){
@@ -34,187 +17,120 @@ const QByteArray UsbTransport::CMD_INIT2 = [](){
 const QByteArray UsbTransport::CMD_POLL  = [](){
     QByteArray c(64, '\0'); c[0]=char(0xAA); c[1]=char(0x83); c[63]=char(0x9E); return c; }();
 
-// ── Constructor / destructor ──────────────────────────────────────────────
 UsbTransport::UsbTransport(QObject* parent) : BaseTransport(parent) {}
 
 void UsbTransport::requestStop()
 {
     m_stop.store(true, std::memory_order_relaxed);
-    quit(); // stop exec() event loop
 }
 
-// ── Sysfs discovery (Linux only) ─────────────────────────────────────────
-#ifdef Q_OS_LINUX
-
-QString UsbTransport::findHidraw()
+// ── Write helper (prepends 0x00 report-ID required by hidapi) ─────────────
+bool UsbTransport::sendHidCmd(hid_device_* dev, const QByteArray& cmd)
 {
-    const QString vid = "2e3c", pid = "5558";
-    for (int attempt = 0; attempt < 15; ++attempt) {
-        const auto entries = QDir("/sys/class/hidraw").entryList(QDir::Dirs | QDir::NoDotAndDotDot);
-        for (const auto& name : entries) {
-            const QString uevent = QString("/sys/class/hidraw/%1/device/../uevent").arg(name);
-            QFile f(uevent);
-            if (!f.open(QIODevice::ReadOnly)) continue;
-            const QString content = f.readAll();
-            for (const auto& line : content.split('\n')) {
-                if (line.startsWith("PRODUCT=") &&
-                    line.mid(8).toLower().startsWith(vid + "/" + pid + "/"))
-                    return "/dev/" + name;
-            }
-        }
-        if (attempt < 14) {
-            emit statusMessage("Waiting for FNB58 USB device…");
-            QThread::sleep(1);
-        }
-    }
-    return {};
-}
-
-// ── Write helper ──────────────────────────────────────────────────────────
-bool UsbTransport::writeCmd(int fd, const QByteArray& cmd)
-{
+    uint8_t buf[65] = {};
+    buf[0] = 0x00;  // report ID (none — device uses single report)
+    std::memcpy(buf + 1, cmd.constData(), qMin(cmd.size(), 64));
     for (int retry = 0; retry < 5; ++retry) {
-        ssize_t n = ::write(fd, cmd.constData(), cmd.size());
-        if (n == cmd.size()) return true;
-        if (errno == ETIMEDOUT || errno == EPROTO) {
-            QThread::msleep(150);
-            continue;
-        }
-        return false;
+        if (hid_write(dev, buf, 65) > 0) return true;
+        QThread::msleep(150);
     }
     return false;
 }
 
-// ── Device init ───────────────────────────────────────────────────────────
-void UsbTransport::initDevice(int fd)
-{
-    // Drain stale data before sending init
-    char drain[64];
-    while (true) {
-        fd_set rfds; FD_ZERO(&rfds); FD_SET(fd, &rfds);
-        timeval tv{0, 20000}; // 20 ms
-        if (::select(fd + 1, &rfds, nullptr, nullptr, &tv) <= 0) break;
-        if (::read(fd, drain, sizeof(drain)) <= 0) break;
-    }
-
-    writeCmd(fd, CMD_INIT1);
-    QThread::msleep(50);
-    writeCmd(fd, CMD_INIT2);
-    QThread::msleep(50);
-    writeCmd(fd, CMD_INIT2);
-}
-
 // ── Packet decoder ────────────────────────────────────────────────────────
-void UsbTransport::decodeAndEmit(const char* buf)
+void UsbTransport::decodeAndEmit(const uint8_t* buf)
 {
-    auto u8 = [&](int i){ return static_cast<uint8_t>(buf[i]); };
-    if (u8(0) != 0xAA || u8(1) != 0x04) return;
+    if (buf[0] != 0xAA || buf[1] != 0x04) return;
 
-    const int off = 2; // first sample starts at byte 2
+    const int off = 2;
     auto u32le = [&](int i) -> uint32_t {
-        return u8(i) | (uint32_t(u8(i+1))<<8) | (uint32_t(u8(i+2))<<16) | (uint32_t(u8(i+3))<<24);
+        return buf[i] | (uint32_t(buf[i+1])<<8) | (uint32_t(buf[i+2])<<16) | (uint32_t(buf[i+3])<<24);
     };
     auto u16le = [&](int i) -> uint16_t {
-        return u8(i) | (uint16_t(u8(i+1))<<8);
+        return buf[i] | (uint16_t(buf[i+1])<<8);
     };
 
-    double vbus  = u32le(off + 0)  / 100000.0;
-    double ibus  = u32le(off + 4)  / 100000.0;
-    double dp    = u16le(off + 8)  / 1000.0;
-    double dn    = u16le(off + 10) / 1000.0;
-    double temp  = u16le(off + 13) / 10.0;
+    double vbus = u32le(off + 0)  / 100000.0;
+    double ibus = u32le(off + 4)  / 100000.0;
+    double dp   = u16le(off + 8)  / 1000.0;
+    double dn   = u16le(off + 10) / 1000.0;
+    double temp = u16le(off + 13) / 10.0;
     emit reading(vbus, ibus, vbus * ibus, dp, dn, temp);
 }
 
+// ── Thread-safe command injection (called from main thread for triggers) ──
 void UsbTransport::sendCommand(const QByteArray& cmd)
 {
-    if (m_fd >= 0)
-        writeCmd(m_fd, cmd);
+    QMutexLocker lock(&m_devMutex);
+    if (m_dev) sendHidCmd(m_dev, cmd);
 }
 
 // ── Thread entry ─────────────────────────────────────────────────────────
 void UsbTransport::run()
 {
-    const QString path = findHidraw();
-    if (path.isEmpty()) {
-        emit error("FNB58 USB device not found. Is it connected?");
+    hid_init();
+
+    hid_device_* dev = nullptr;
+    emit statusMessage("Waiting for FNB58 USB device…");
+    for (int i = 0; i < 150 && !m_stop; ++i) {
+        dev = hid_open(FNB58_VID, FNB58_PID, nullptr);
+        if (dev) break;
+        QThread::msleep(100);
+    }
+    if (!dev) {
+        emit error("FNB58 USB device not found (VID=2e3c PID=5558). "
+                   "Is it connected?");
+        hid_exit();
         return;
     }
 
-    int fd = ::open(path.toLocal8Bit().constData(), O_RDWR);
-    if (fd < 0) {
-        emit error(QString("Cannot open %1: %2").arg(path, strerror(errno)));
-        return;
-    }
+    // Drain stale data (non-blocking reads until empty)
+    hid_set_nonblocking(dev, 1);
+    uint8_t drain[64];
+    while (hid_read(dev, drain, sizeof(drain)) > 0) {}
+    hid_set_nonblocking(dev, 0);
 
-    initDevice(fd);
+    // Init sequence
+    sendHidCmd(dev, CMD_INIT1);
+    QThread::msleep(50);
+    sendHidCmd(dev, CMD_INIT2);
+    QThread::msleep(50);
+    sendHidCmd(dev, CMD_INIT2);
+
+    {
+        QMutexLocker lock(&m_devMutex);
+        m_dev = dev;
+    }
     emit statusMessage("USB connected — streaming");
-    m_fd = fd;
 
-    // Try a gentle restart if device was already in measurement mode
-    // (drain + INIT2 only first)
-    auto tryPoll = [&]() -> bool {
-        writeCmd(fd, CMD_POLL);
-        fd_set rfds; FD_ZERO(&rfds); FD_SET(fd, &rfds);
-        timeval tv{1, 0};
-        return ::select(fd + 1, &rfds, nullptr, nullptr, &tv) > 0;
-    };
-    if (!tryPoll()) {
-        initDevice(fd); // full init if no data yet
+    QElapsedTimer emitTimer, pollTimer;
+    emitTimer.start();
+    pollTimer.start();
+
+    uint8_t rbuf[64];
+    while (!m_stop) {
+        // hid_read_timeout: blocks up to 200 ms, returns 0 on timeout
+        int n = hid_read_timeout(dev, rbuf, sizeof(rbuf), 200);
+        if (n < 0) {
+            emit error("USB HID read error — device disconnected?");
+            break;
+        }
+
+        if (pollTimer.elapsed() >= 900) {
+            sendHidCmd(dev, CMD_POLL);
+            pollTimer.restart();
+        }
+
+        if (n > 0 && emitTimer.elapsed() >= static_cast<qint64>(EMIT_INTERVAL_S * 1000)) {
+            decodeAndEmit(rbuf);
+            emitTimer.restart();
+        }
     }
 
-    // QSocketNotifier notifies us when the HID fd has data
-    auto* notifier = new QSocketNotifier(fd, QSocketNotifier::Read);
-    // Poll timer keeps the firmware watchdog alive
-    auto* pollTimer = new QTimer();
-    pollTimer->setInterval(900); // every 0.9 s
-
-    // Decimation: emit at most EMIT_INTERVAL_S
-    QElapsedTimer emitTimer;
-    emitTimer.start();
-
-    connect(notifier, &QSocketNotifier::activated, [&]() {
-        char buf[64] = {};
-        if (::read(fd, buf, 64) == 64) {
-            if (emitTimer.elapsed() >= static_cast<qint64>(EMIT_INTERVAL_S * 1000)) {
-                decodeAndEmit(buf);
-                emitTimer.restart();
-            }
-        }
-    });
-
-    connect(pollTimer, &QTimer::timeout, [&]() {
-        writeCmd(fd, CMD_POLL);
-    });
-
-    // Stop checker
-    auto* stopTimer = new QTimer();
-    stopTimer->setInterval(100);
-    connect(stopTimer, &QTimer::timeout, [this]() {
-        if (m_stop.load(std::memory_order_relaxed))
-            quit();
-    });
-
-    pollTimer->start();
-    stopTimer->start();
-
-    exec(); // run event loop
-
-    m_fd = -1;
-    delete notifier;
-    delete pollTimer;
-    delete stopTimer;
-    ::close(fd);
+    {
+        QMutexLocker lock(&m_devMutex);
+        m_dev = nullptr;
+    }
+    hid_close(dev);
+    hid_exit();
 }
-
-#else  // !Q_OS_LINUX ─────────────────────────────────────────────────────
-
-void UsbTransport::sendCommand(const QByteArray&) {}
-
-void UsbTransport::run()
-{
-    emit error("USB HID transport requires Linux (hidraw). "
-               "Please run on a Linux system.");
-}
-
-#endif // Q_OS_LINUX

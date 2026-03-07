@@ -8,10 +8,14 @@
 #include <QDateTime>
 #include <QFileInfo>
 #include <QUrl>
-#include <QProcess>
 #include <QtMath>
 #include <cmath>
 #include <limits>
+
+#ifdef FNB58_HAVE_BLUETOOTH
+#  include <QBluetoothDeviceDiscoveryAgent>
+#  include <QBluetoothDeviceInfo>
+#endif
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 static double nowSecs() {
@@ -171,7 +175,17 @@ void DeviceBackend::start(const QString& transport, const QString& address)
     if (transport == "usb") {
         m_transport = new UsbTransport(this);
     } else {
-        m_transport = new BleTransport(address.trimmed(), this);
+#ifdef FNB58_HAVE_BLUETOOTH
+        const QString mac = address.trimmed();
+        QBluetoothDeviceInfo info = m_bleDeviceCache.value(mac);
+        if (!info.isValid())
+            info = QBluetoothDeviceInfo(QBluetoothAddress(mac), mac, 0);
+        m_transport = new BleTransport(info, this);
+#else
+        emit statusChanged("BLE not available: rebuild with Qt Bluetooth (qtconnectivity).");
+        emit runningChanged(false);
+        return;
+#endif
     }
 
     connect(m_transport, &BaseTransport::reading,
@@ -329,32 +343,42 @@ QVariantMap DeviceBackend::measureRange(double tStart, double tEnd) const
 // ── BLE device scan ───────────────────────────────────────────────────────
 void DeviceBackend::scanBleDevices()
 {
-#ifdef Q_OS_LINUX
-    emit statusChanged("Scanning for paired BLE devices…");
-    QProcess proc;
-    proc.start("bluetoothctl", {"devices", "Paired"});
-    proc.waitForFinished(5000);
-    const QString out = proc.readAllStandardOutput();
+#ifdef FNB58_HAVE_BLUETOOTH
+    emit statusChanged("Scanning for BLE devices (5 s)…");
 
-    QStringList result;
-    for (const QString& line : out.split('\n', Qt::SkipEmptyParts)) {
-        // Format: "Device BA:03:18:7A:23:DF FNB58-038059"
-        const QStringList parts = line.trimmed().split(' ', Qt::SkipEmptyParts);
-        if (parts.size() >= 3 && parts[0] == "Device") {
-            const QString mac  = parts[1];
-            const QString name = parts.mid(2).join(' ');
-            result << QString("%1 (%2)").arg(name, mac);
+    auto* agent = new QBluetoothDeviceDiscoveryAgent(this);
+    agent->setLowEnergyDiscoveryTimeout(5000);
+
+    connect(agent, &QBluetoothDeviceDiscoveryAgent::finished,
+            this, [this, agent]() {
+        QStringList result;
+        for (const auto& info : agent->discoveredDevices()) {
+            if (info.coreConfigurations()
+                    & QBluetoothDeviceInfo::LowEnergyCoreConfiguration) {
+                const QString mac  = info.address().toString();
+                const QString name = info.name().isEmpty() ? mac : info.name();
+                m_bleDeviceCache.insert(mac, info);
+                result << QString("%1 (%2)").arg(name, mac);
+            }
         }
-    }
+        if (result.isEmpty())
+            emit statusChanged("No BLE devices found. Make sure FNB58 is powered on.");
+        else
+            emit statusChanged(QString("Found %1 BLE device(s)").arg(result.size()));
+        emit bleDevicesFound(result);
+        agent->deleteLater();
+    });
 
-    if (result.isEmpty())
-        emit statusChanged("No paired BLE devices found. Pair first with bluetoothctl.");
-    else
-        emit statusChanged(QString("Found %1 paired device(s)").arg(result.size()));
+    connect(agent, &QBluetoothDeviceDiscoveryAgent::errorOccurred,
+            this, [this, agent](QBluetoothDeviceDiscoveryAgent::Error) {
+        emit statusChanged(QString("BLE scan error: %1").arg(agent->errorString()));
+        emit bleDevicesFound({});
+        agent->deleteLater();
+    });
 
-    emit bleDevicesFound(result);
+    agent->start(QBluetoothDeviceDiscoveryAgent::LowEnergyMethod);
 #else
-    emit statusChanged("BLE scan requires Linux (BlueZ). Not available on this platform.");
+    emit statusChanged("BLE not available: rebuild with Qt Bluetooth (qtconnectivity).");
     emit bleDevicesFound({});
 #endif
 }

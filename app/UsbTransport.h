@@ -1,8 +1,10 @@
 #pragma once
 #include "BaseTransport.h"
-#include <QTimer>
-#include <QSocketNotifier>
+#include <QMutex>
+#include <QElapsedTimer>
 #include <atomic>
+
+struct hid_device_;  // forward declaration (avoids pulling in hidapi.h here)
 
 class UsbTransport : public BaseTransport
 {
@@ -17,16 +19,17 @@ protected:
 
 private:
     std::atomic<bool> m_stop{false};
-    int m_fd = -1;  // Set during run(); safe to access in transport thread
+    hid_device_*      m_dev{nullptr};   // set inside run(); protected by m_devMutex
+    QMutex            m_devMutex;
 
     static const QByteArray CMD_INIT1;
     static const QByteArray CMD_INIT2;
     static const QByteArray CMD_POLL;
 
-    static constexpr double EMIT_INTERVAL_S = 0.1;
+    static constexpr double   EMIT_INTERVAL_S = 0.1;
+    static constexpr uint16_t FNB58_VID = 0x2e3c;
+    static constexpr uint16_t FNB58_PID = 0x5558;
 
-    QString findHidraw();
-    bool    writeCmd(int fd, const QByteArray& cmd);
-    void    initDevice(int fd);
-    void    decodeAndEmit(const char* buf);
+    bool sendHidCmd(hid_device_* dev, const QByteArray& cmd);
+    void decodeAndEmit(const uint8_t* buf);
 };

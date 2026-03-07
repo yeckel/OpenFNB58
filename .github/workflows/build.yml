@@ -24,13 +24,13 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y \
             libgl1-mesa-dev libdbus-1-dev ninja-build libfuse2 \
-            libglib2.0-dev libpulse-dev
+            libglib2.0-dev libpulse-dev libhidapi-dev libbluetooth-dev
 
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
         with:
           version: ${{ env.QT_VERSION }}
-          modules: ''
+          modules: 'qtconnectivity'
 
       - name: Build
         run: |
@@ -48,7 +48,7 @@ jobs:
           OUTPUT: OpenFNB58-linux-x86_64.AppImage
           QMAKE: qmake6
           QML_SOURCES_PATHS: ${{ github.workspace }}/app/qml
-          EXTRA_QT_MODULES: "qml;quick;quickcontrols2;quickdialogs2;dbus"
+          EXTRA_QT_MODULES: "qml;quick;quickcontrols2;quickdialogs2;dbus;bluetooth;connectivity"
         run: |
           mkdir -p AppDir/usr/bin AppDir/usr/share/icons/hicolor/256x256/apps
           cp build/bin/fnb58app   AppDir/usr/bin/
@@ -79,12 +79,18 @@ jobs:
         with:
           version: ${{ env.QT_VERSION }}
           arch: win64_msvc2022_64
+          modules: 'qtconnectivity'
 
       - uses: ilammy/msvc-dev-cmd@v1
 
+      - name: Install hidapi (vcpkg)
+        run: vcpkg install hidapi:x64-windows
+
       - name: Build
         run: |
-          cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release app/
+          cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            app/
           cmake --build build --parallel
 
       - name: Deploy with windeployqt
@@ -116,6 +122,10 @@ jobs:
         uses: jurplel/install-qt-action@v4
         with:
           version: ${{ env.QT_VERSION }}
+          modules: 'qtconnectivity'
+
+      - name: Install hidapi
+        run: brew install hidapi
 
       - name: Build
         run: |

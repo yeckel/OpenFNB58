@@ -1,178 +1,47 @@
 #include "BleTransport.h"
 
-// ── Static constants (always defined) ─────────────────────────────────────
-const QByteArray BleTransport::BLE_INIT1 = QByteArray::fromHex("aa8100f4");
-const QByteArray BleTransport::BLE_INIT2 = QByteArray::fromHex("aa8200a7");
-constexpr int BleTransport::PKT_LENS[9];
+#ifdef FNB58_HAVE_BLUETOOTH
 
-BleTransport::BleTransport(const QString& mac, QObject* parent)
-    : BaseTransport(parent), m_mac(mac)
-{}
-
-void BleTransport::requestStop()
-{
-    m_stop.store(true, std::memory_order_relaxed);
-    quit();
-}
-
-#ifdef FNB58_HAVE_DBUS
-
-#include <QDBusConnection>
-#include <QDBusInterface>
-#include <QDBusMessage>
-#include <QDBusArgument>
-#include <QDBusObjectPath>
-#include <QDBusVariant>
-#include <QDBusReply>
-#include <QProcess>
+#include <QBluetoothAddress>
+#include <QBluetoothUuid>
+#include <QLowEnergyController>
+#include <QLowEnergyService>
+#include <QEventLoop>
 #include <QTimer>
+#include <QMutexLocker>
 #include <QDebug>
 
 #include <limits>
 #include <cstdint>
 
-// ── Connect device via bluetoothctl ──────────────────────────────────────
-bool BleTransport::ensureConnected()
-{
-    const QString devPath = "/org/bluez/hci0/dev_" +
-                            m_mac.toUpper().replace(':', '_');
-    QDBusInterface props("org.bluez", devPath,
-                         "org.freedesktop.DBus.Properties",
-                         QDBusConnection::systemBus());
-    QDBusMessage r = props.call("Get", "org.bluez.Device1", "Connected");
-    if (r.type() == QDBusMessage::ReplyMessage && !r.arguments().isEmpty()) {
-        QVariant v = r.arguments().at(0).value<QDBusVariant>().variant();
-        if (v.toBool()) return true;
-    }
+// ── Static constants ───────────────────────────────────────────────────────
+const QByteArray BleTransport::BLE_INIT1 = QByteArray::fromHex("aa8100f4");
+const QByteArray BleTransport::BLE_INIT2 = QByteArray::fromHex("aa8200a7");
+constexpr int    BleTransport::PKT_LENS[9];
 
-    emit statusMessage(QString("Connecting to %1…").arg(m_mac));
-    QProcess proc;
-    proc.start("bluetoothctl", {"connect", m_mac});
-    proc.waitForFinished(15000);
-    const QString out = proc.readAllStandardOutput();
-    if (!out.contains("Connection successful")) {
-        emit error(QString("Cannot connect to %1:\n%2").arg(m_mac, out.trimmed()));
-        return false;
-    }
-    QThread::msleep(1500);
-    return true;
+BleTransport::BleTransport(const QBluetoothDeviceInfo& device, QObject* parent)
+    : BaseTransport(parent), m_device(device)
+{}
+
+void BleTransport::requestStop()
+{
+    m_stop.store(true, std::memory_order_relaxed);
 }
 
-// ── Locate ffe4/ffe9 via BlueZ ObjectManager ─────────────────────────────
-// GetManagedObjects returns a{oa{sa{sv}}}.
-// QDBusArgument does NOT support extracting into another QDBusArgument;
-// nested maps must be opened/closed on the *same* argument object.
-bool BleTransport::findGattChars(QString& notifyPath, QString& writePath)
+void BleTransport::sendCommand(const QByteArray& cmd)
 {
-    QDBusInterface mgr("org.bluez", "/",
-                       "org.freedesktop.DBus.ObjectManager",
-                       QDBusConnection::systemBus());
-    QDBusMessage reply = mgr.call("GetManagedObjects");
-    if (reply.type() != QDBusMessage::ReplyMessage || reply.arguments().isEmpty()) {
-        emit error("GetManagedObjects failed");
-        return false;
-    }
-
-    const QString devPrefix = "/org/bluez/hci0/dev_" +
-                              m_mac.toUpper().replace(':', '_');
-
-    const QDBusArgument arg = reply.arguments().at(0).value<QDBusArgument>();
-
-    arg.beginMap(); // a{o a{sa{sv}}}
-    while (!arg.atEnd()) {
-        arg.beginMapEntry();
-
-        QString objPath;
-        arg >> objPath;               // object path (o)
-
-        arg.beginMap();               // a{s a{sv}}  — interfaces map
-        while (!arg.atEnd()) {
-            arg.beginMapEntry();
-            QString ifaceName;
-            arg >> ifaceName;         // interface name (s)
-
-            if (objPath.startsWith(devPrefix) &&
-                ifaceName == "org.bluez.GattCharacteristic1")
-            {
-                arg.beginMap();       // a{sv}  — properties map
-                while (!arg.atEnd()) {
-                    arg.beginMapEntry();
-                    QString propName;
-                    arg >> propName;
-                    QDBusVariant propVal;
-                    arg >> propVal;
-                    if (propName == "UUID") {
-                        const QString uuid = propVal.variant().toString();
-                        if (uuid == UUID_NOTIFY)     notifyPath = objPath;
-                        else if (uuid == UUID_WRITE) writePath  = objPath;
-                    }
-                    arg.endMapEntry();
-                }
-                arg.endMap();
-            } else {
-                // Consume unknown properties without storing
-                arg.beginMap();
-                while (!arg.atEnd()) {
-                    arg.beginMapEntry();
-                    QString k; QDBusVariant v;
-                    arg >> k >> v;
-                    arg.endMapEntry();
-                }
-                arg.endMap();
-            }
-
-            arg.endMapEntry();
-        }
-        arg.endMap();                 // end interfaces map
-
-        arg.endMapEntry();
-    }
-    arg.endMap();
-
-    if (notifyPath.isEmpty() || writePath.isEmpty()) {
-        emit error(QString("ffe4/ffe9 not found for %1. Is device connected?").arg(m_mac));
-        return false;
-    }
-    return true;
+    QMutexLocker lock(&m_writeMutex);
+    if (m_svc && m_writeChar.isValid())
+        m_svc->writeCharacteristic(m_writeChar, cmd,
+                                   QLowEnergyService::WriteWithoutResponse);
 }
 
-// ── Write to a GATT characteristic ───────────────────────────────────────
-void BleTransport::writeGatt(const QString& path, const QByteArray& data)
+// ── BLE packet parser (unchanged protocol) ────────────────────────────────
+void BleTransport::parseBlePacket(const QByteArray& chunk)
 {
-    QDBusInterface iface("org.bluez", path,
-                         "org.bluez.GattCharacteristic1",
-                         QDBusConnection::systemBus());
-    iface.call("WriteValue", data, QVariantMap{});
-}
-
-// ── D-Bus PropertiesChanged slot ─────────────────────────────────────────
-void BleTransport::onPropertiesChanged(const QString& iface,
-                                       const QVariantMap& changed,
-                                       const QStringList& /*invalidated*/)
-{
-    if (iface != "org.bluez.GattCharacteristic1") return;
-
-    auto it = changed.find("Value");
-    if (it == changed.end()) return;
-
-    // Value comes as QByteArray or as QDBusArgument(ay) depending on Qt
-    QByteArray chunk;
-    if (it->canConvert<QByteArray>()) {
-        chunk = it->toByteArray();
-    } else {
-        const QDBusArgument arg = it->value<QDBusArgument>();
-        arg.beginArray();
-        while (!arg.atEnd()) {
-            uchar b; arg >> b;
-            chunk.append(static_cast<char>(b));
-        }
-        arg.endArray();
-    }
-    if (chunk.isEmpty()) return;
-
-    // Parse BLE stream frames: aa [type] [data_len] [data…] [chk]
-    const auto* d = reinterpret_cast<const uint8_t*>(chunk.constData());
-    int i = 0, len = chunk.size();
+    const auto* d   = reinterpret_cast<const uint8_t*>(chunk.constData());
+    int         i   = 0;
+    const int   len = chunk.size();
     const double nan = std::numeric_limits<double>::quiet_NaN();
 
     while (i < len) {
@@ -188,14 +57,14 @@ void BleTransport::onPropertiesChanged(const QString& iface,
             return (b[0] | (uint16_t(b[1]) << 8)) / 1000.0;
         };
 
-        if (ptype == 0x07) {        // VBUS / IBUS
+        if (ptype == 0x07) {
             double vbus = u16(p);
             double ibus = u16(p + 2);
             emit reading(vbus, ibus, vbus * ibus,
                          m_hasDp ? m_lastDp : nan,
                          m_hasDp ? m_lastDn : nan,
                          nan);
-        } else if (ptype == 0x06) { // D+ / D-
+        } else if (ptype == 0x06) {
             m_lastDp = u16(p);
             m_lastDn = u16(p + 2);
             m_hasDp  = true;
@@ -207,61 +76,116 @@ void BleTransport::onPropertiesChanged(const QString& iface,
 // ── Thread entry ──────────────────────────────────────────────────────────
 void BleTransport::run()
 {
-    if (!ensureConnected()) return;
+    auto* ctl = QLowEnergyController::createCentral(m_device);
+    QEventLoop loop;
+    QLowEnergyService* svc = nullptr;
 
-    QString notifyPath, writePath;
-    if (!findGattChars(notifyPath, writePath)) return;
+    connect(ctl, &QLowEnergyController::connected, [&]() {
+        emit statusMessage(
+            QString("BLE connected to %1, discovering services…")
+            .arg(m_device.address().toString()));
+        ctl->discoverServices();
+    });
 
-    QDBusConnection bus = QDBusConnection::systemBus();
+    connect(ctl, &QLowEnergyController::discoveryFinished, [&]() {
+        svc = ctl->createServiceObject(
+            QBluetoothUuid(QLatin1String(UUID_SERVICE)));
+        if (!svc) {
+            emit error("FFE0 service not found — is this an FNB58?");
+            loop.quit();
+            return;
+        }
 
-    // Connect PropertiesChanged — delivered in *this* thread's event loop
-    bus.connect("org.bluez", notifyPath,
-                "org.freedesktop.DBus.Properties", "PropertiesChanged",
-                this,
-                SLOT(onPropertiesChanged(QString, QVariantMap, QStringList)));
+        connect(svc, &QLowEnergyService::stateChanged,
+                [&, svc](QLowEnergyService::ServiceState state) {
+            if (state != QLowEnergyService::RemoteServiceDiscovered) return;
 
-    QDBusInterface ni("org.bluez", notifyPath,
-                      "org.bluez.GattCharacteristic1", bus);
-    ni.call("StopNotify");
-    ni.call("StartNotify");
+            auto notifyChar = svc->characteristic(
+                QBluetoothUuid(QLatin1String(UUID_NOTIFY)));
+            auto writeChar  = svc->characteristic(
+                QBluetoothUuid(QLatin1String(UUID_WRITE)));
 
-    writeGatt(writePath, BLE_INIT1);
+            if (!notifyChar.isValid() || !writeChar.isValid()) {
+                emit error("FFE4/FFE9 characteristics not found");
+                loop.quit();
+                return;
+            }
 
-    auto* initTimer = new QTimer();
-    initTimer->setSingleShot(true);
-    initTimer->setInterval(2000);
-    connect(initTimer, &QTimer::timeout, this,
-            [this, writePath]() { writeGatt(writePath, BLE_INIT2); });
-    initTimer->start();
+            // Enable notifications via Client Characteristic Configuration Descriptor
+            auto cccd = notifyChar.descriptor(
+                QBluetoothUuid::DescriptorType::ClientCharacteristicConfiguration);
+            if (cccd.isValid())
+                svc->writeDescriptor(cccd, QByteArray::fromHex("0100"));
 
+            // Expose write char for sendCommand()
+            {
+                QMutexLocker lk(&m_writeMutex);
+                m_svc       = svc;
+                m_writeChar = writeChar;
+            }
+
+            svc->writeCharacteristic(writeChar, BLE_INIT1,
+                                     QLowEnergyService::WriteWithoutResponse);
+            QTimer::singleShot(2000, [this, svc, writeChar]() mutable {
+                if (!m_stop)
+                    svc->writeCharacteristic(writeChar, BLE_INIT2,
+                                             QLowEnergyService::WriteWithoutResponse);
+            });
+
+            emit statusMessage(
+                QString("BLE streaming — %1").arg(m_device.address().toString()));
+        });
+
+        connect(svc, &QLowEnergyService::characteristicChanged,
+                [&](const QLowEnergyCharacteristic& c, const QByteArray& value) {
+            if (c.uuid() == QBluetoothUuid(QLatin1String(UUID_NOTIFY)))
+                parseBlePacket(value);
+        });
+
+        connect(svc, &QLowEnergyService::errorOccurred,
+                [&](QLowEnergyService::ServiceError e) {
+            emit error(QString("BLE service error %1").arg(static_cast<int>(e)));
+            loop.quit();
+        });
+
+        svc->discoverDetails();
+    });
+
+    connect(ctl, &QLowEnergyController::errorOccurred,
+            [&](QLowEnergyController::Error) {
+        emit error(QString("BLE error: %1").arg(ctl->errorString()));
+        loop.quit();
+    });
+
+    connect(ctl, &QLowEnergyController::disconnected, [&]() {
+        if (!m_stop) emit error("BLE device disconnected unexpectedly");
+        loop.quit();
+    });
+
+    // Poll m_stop every 100 ms so requestStop() is honored promptly
     auto* stopTimer = new QTimer();
     stopTimer->setInterval(100);
-    connect(stopTimer, &QTimer::timeout, this, [this]() {
-        if (m_stop.load(std::memory_order_relaxed)) quit();
+    QObject::connect(stopTimer, &QTimer::timeout, [&]() {
+        if (m_stop.load()) loop.quit();
     });
     stopTimer->start();
 
-    emit statusMessage(QString("BLE streaming — %1").arg(m_mac));
+    emit statusMessage(
+        QString("Connecting to BLE %1…").arg(m_device.address().toString()));
+    ctl->connectToDevice();
+    loop.exec();
 
-    exec();
-
-    ni.call("StopNotify");
-    bus.disconnect("org.bluez", notifyPath,
-                   "org.freedesktop.DBus.Properties", "PropertiesChanged",
-                   this,
-                   SLOT(onPropertiesChanged(QString, QVariantMap, QStringList)));
-    delete initTimer;
+    // ── Cleanup ────────────────────────────────────────────────────────────
+    {
+        QMutexLocker lk(&m_writeMutex);
+        m_svc = nullptr;
+        m_writeChar = QLowEnergyCharacteristic{};
+    }
+    stopTimer->stop();
     delete stopTimer;
+    if (svc) delete svc;
+    ctl->disconnectFromDevice();
+    delete ctl;
 }
 
-#else  // !FNB58_HAVE_DBUS ─────────────────────────────────────────────────
-
-void BleTransport::onPropertiesChanged(const QString&, const QVariantMap&, const QStringList&) {}
-
-void BleTransport::run()
-{
-    emit error("BLE transport requires Linux with BlueZ (D-Bus). "
-               "Please run on a Linux system.");
-}
-
-#endif // FNB58_HAVE_DBUS
+#endif // FNB58_HAVE_BLUETOOTH
