@@ -98,6 +98,7 @@ jobs:
         run: |
           mkdir deploy
           copy build\bin\fnb58app.exe deploy\
+          copy %VCPKG_INSTALLATION_ROOT%\installed\x64-windows\bin\hidapi.dll deploy\
           windeployqt --release --qmldir app\qml deploy\fnb58app.exe
 
       - name: Package as zip
