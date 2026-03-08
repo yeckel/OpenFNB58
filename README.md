@@ -2,24 +2,39 @@
 
 Open-source tools for the **FNIRSI FNB58** USB power meter / charger tester.
 
+**Author:** Libor Tomsik, OK1CHP
+
 Includes a Python CLI reader and a Qt 6 / QML desktop application with live charts,
 range measurement, protocol detection, fast-charge trigger, and CSV/Excel export.
+Works on **Linux**, **Windows**, and **macOS** over **USB HID** or **Bluetooth LE**.
 
 ---
 
 ## Screenshots
 
-**Idle — ready to connect**
-![Idle state](docs/screenshots/01_idle.png)
-
-**Live streaming — USB SDP detected, real-time voltage/current/temperature**
+**Live streaming over BLE — 5 V / 1.73 A, USB SDP detected**
 ![Running with live data](docs/screenshots/02_running.png)
+
+**BLE device picker — scans for nearby FNB58 devices**
+![BLE device selection](docs/screenshots/01_idle.png)
+
+**📐 Range measurement — drag to select, stats panel slides up**
+![Measurement panel](docs/screenshots/04_measurement.png)
 
 **⚡ Fast-charge trigger popup — select protocol and target voltage**
 ![Trigger popup](docs/screenshots/03_trigger.png)
 
-**📐 Range measurement — drag to select, stats panel slides up**
-![Measurement panel](docs/screenshots/04_measurement.png)
+---
+
+## Downloads
+
+Pre-built binaries are attached to each [GitHub Release](https://github.com/yeckel/OpenFNB58/releases):
+
+| Platform | File | Notes |
+|----------|------|-------|
+| Linux    | `OpenFNB58-linux-x86_64.AppImage` | `chmod +x`, then run |
+| Windows  | `OpenFNB58-windows-x86_64.zip`    | Unzip and run `fnb58app.exe` |
+| macOS    | `OpenFNB58-macos.dmg`             | Drag to Applications |
 
 ---
 
@@ -37,12 +52,13 @@ range measurement, protocol detection, fast-charge trigger, and CSV/Excel export
 - **Live readout bar** — VBUS, IBUS, Power, D+, D−, Temperature, **Protocol badge**
 - **Protocol detection** — identifies USB SDP/DCP, QC 2.0/3.0, Apple, Samsung, Huawei FCP, USB PD from D+/D− voltages
 - **Fast-charge trigger** — ⚡ Trigger button sends QC/FCP/SCP/PD trigger commands (experimental)
-- **USB and BLE transport** — auto-discovery for USB; scan + pick for BLE
-- **Range measurement** — click-drag on any chart to select a time window; shows energy (Wh/mWh/mAh), mean & peak V/I/P, temperature min/max
+- **USB and BLE transport** — USB auto-connect; BLE scan popup picks from nearby devices
+- **Range measurement** — click-drag on any chart to select a time window; shows energy (Wh/mWh/mAh), mean & peak V/I/P
 - **Energy marker** — reset the Wh accumulator mid-session to measure a charging phase
 - **Zoom & pan** — scroll wheel to zoom in/out, right-click drag to pan both charts
-- **Export** — native file dialog, CSV and Excel (.xlsx) output
+- **Export** — single **⬇ Export…** button, native OS save dialog, CSV and Excel (.xlsx) output
 - Dark Material theme, configurable time window, follow mode
+- Cross-platform: **Linux** (AppImage), **Windows** (zip), **macOS** (dmg)
 
 ---
 
@@ -53,9 +69,9 @@ range measurement, protocol detection, fast-charge trigger, and CSV/Excel export
 | Device   | FNIRSI FNB58 |
 | USB VID:PID | `2E3C:5558` |
 | USB interface | HID (interface #3) → `/dev/hidraw*` |
-| BLE service | `ffe0` (RFstar transparent UART) |
-| BLE notify char | `ffe4` |
-| BLE write char  | `ffe9` |
+| BLE services | `ffe0` (notify), `ffe5` (write) |
+| BLE notify char | `ffe4` (in service `ffe0`) |
+| BLE write char  | `ffe9` (in service `ffe5`) |
 
 ---
 
@@ -71,24 +87,32 @@ sudo usermod -aG plugdev $USER   # re-login after
 ```
 
 ### Qt GUI
-- **Qt 6.5+** with: Core, Gui, Quick, QuickControls2, QML, DBus, Widgets, QuickDialogs2
-- CMake 3.28+, GCC with C++20
+- **Qt 6.5+** with: Core, Gui, Quick, QuickControls2, QML, Widgets, Bluetooth (optional)
+- CMake 3.28+, C++20 compiler
+- **hidapi** — `libhidapi-dev` (Linux), `brew install hidapi` (macOS), bundled via vcpkg (Windows)
 
 Tested with Qt 6.9.2 from the [Qt online installer](https://www.qt.io/download).
 
-```bash
-# Install Qt (aqt example)
-pip install aqtinstall
-aqt install-qt linux desktop 6.9.2 gcc_64
-```
-
-For BLE, BlueZ must be running and the device pre-paired:
+For BLE on Linux, BlueZ must be running and the device pre-paired:
 ```bash
 bluetoothctl
   scan on
   pair BA:03:18:7A:23:DF
   trust BA:03:18:7A:23:DF
 ```
+
+---
+
+## Building from Source
+
+```bash
+cd app
+cmake -B build -DCMAKE_BUILD_TYPE=Release .
+cmake --build build --parallel
+./build/bin/fnb58app
+```
+
+On Linux, Qt 6.9 from `/opt/Qt` is detected automatically if present.
 
 ---
 
@@ -111,10 +135,6 @@ Response header: `AA 04`, followed by 4 × 15-byte samples.
 | D+       | 8      | uint16-LE   | ÷ 1000    |
 | D−       | 10     | uint16-LE   | ÷ 1000    |
 | Temp     | 12     | uint16-LE   | ÷ 10      |
-
-> **Important:** sending INIT1 (`AA 81`) to a device that is already streaming causes
-> `ETIMEDOUT` and a USB disconnect. The code tries POLL first, falls back to INIT2,
-> and only sends INIT1 as a last resort.
 
 ## BLE Protocol
 
@@ -155,12 +175,6 @@ python3 fnb58.py --trigger 2 --voltage 9 --hold 3
 
 ### Qt GUI
 
-```bash
-cd app
-bash build.sh                      # configure + build (Qt 6.9 in /opt/Qt)
-./build/bin/fnb58app
-```
-
 **USB mode:** select *USB*, leave Device/MAC blank, click ▶ Start.  
 **BLE mode:** select *BLE*, click ⊕ Scan, pick your device, click ▶ Start.
 
@@ -182,8 +196,8 @@ OpenFNB58/
     ├── main.cpp
     ├── DataRecord.h           Measurement sample struct
     ├── BaseTransport.h        Abstract QThread transport
-    ├── UsbTransport.h/cpp     USB HID worker
-    ├── BleTransport.h/cpp     BLE / BlueZ D-Bus worker
+    ├── UsbTransport.h/cpp     USB HID worker (hidapi, cross-platform)
+    ├── BleTransport.h/cpp     BLE worker (Qt Bluetooth, cross-platform)
     ├── DeviceBackend.h/cpp    QML-exposed backend (energy, export, measure)
     ├── XlsxWriter.h/cpp       OOXML .xlsx writer (no external deps)
     ├── ZipWriter.h/cpp        STORE-only ZIP (used by XlsxWriter)
@@ -203,3 +217,6 @@ OpenFNB58/
 ## License
 
 [GNU General Public License v3.0](LICENSE) — see `LICENSE` for full terms.
+
+Copyright © 2024–2026 Libor Tomsik, OK1CHP
+
