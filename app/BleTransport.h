@@ -28,9 +28,11 @@ private:
     QBluetoothDeviceInfo m_device;
     std::atomic<bool>    m_stop{false};
 
-    static constexpr auto UUID_SERVICE = "0000ffe0-0000-1000-8000-00805f9b34fb";
-    static constexpr auto UUID_NOTIFY  = "0000ffe4-0000-1000-8000-00805f9b34fb";
-    static constexpr auto UUID_WRITE   = "0000ffe9-0000-1000-8000-00805f9b34fb";
+    // FFE4 (notify) lives in service FFE0; FFE9 (write) lives in service FFE5
+    static constexpr auto UUID_SVC_NOTIFY = "0000ffe0-0000-1000-8000-00805f9b34fb";
+    static constexpr auto UUID_SVC_WRITE  = "0000ffe5-0000-1000-8000-00805f9b34fb";
+    static constexpr auto UUID_NOTIFY     = "0000ffe4-0000-1000-8000-00805f9b34fb";
+    static constexpr auto UUID_WRITE      = "0000ffe9-0000-1000-8000-00805f9b34fb";
 
     static const QByteArray BLE_INIT1;
     static const QByteArray BLE_INIT2;

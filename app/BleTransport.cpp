@@ -78,7 +78,56 @@ void BleTransport::run()
 {
     auto* ctl = QLowEnergyController::createCentral(m_device);
     QEventLoop loop;
-    QLowEnergyService* svc = nullptr;
+
+    // FFE4 (notify) is in service FFE0; FFE9 (write) is in service FFE5
+    QLowEnergyService* svcNotify = nullptr;
+    QLowEnergyService* svcWrite  = nullptr;
+    int discoveredCount = 0;   // tracks how many of the two services are ready
+
+    auto tryStart = [&]() {
+        if (discoveredCount < 2) return;
+
+        auto notifyChar = svcNotify->characteristic(
+            QBluetoothUuid(QLatin1String(UUID_NOTIFY)));
+        auto writeChar  = svcWrite->characteristic(
+            QBluetoothUuid(QLatin1String(UUID_WRITE)));
+
+        if (!notifyChar.isValid() || !writeChar.isValid()) {
+            // Log what we actually found to help future debugging
+            qWarning() << "FFE4/FFE9 not found. FFE0 chars:";
+            for (auto& c : svcNotify->characteristics())
+                qWarning() << " " << c.uuid().toString();
+            qWarning() << "FFE5 chars:";
+            for (auto& c : svcWrite->characteristics())
+                qWarning() << " " << c.uuid().toString();
+            emit error("FFE4/FFE9 characteristics not found");
+            loop.quit();
+            return;
+        }
+
+        // Enable notifications via CCCD
+        auto cccd = notifyChar.descriptor(
+            QBluetoothUuid::DescriptorType::ClientCharacteristicConfiguration);
+        if (cccd.isValid())
+            svcNotify->writeDescriptor(cccd, QByteArray::fromHex("0100"));
+
+        {
+            QMutexLocker lk(&m_writeMutex);
+            m_svc       = svcWrite;
+            m_writeChar = writeChar;
+        }
+
+        svcWrite->writeCharacteristic(writeChar, BLE_INIT1,
+                                      QLowEnergyService::WriteWithoutResponse);
+        QTimer::singleShot(2000, [this, svcWrite, writeChar]() mutable {
+            if (!m_stop)
+                svcWrite->writeCharacteristic(writeChar, BLE_INIT2,
+                                              QLowEnergyService::WriteWithoutResponse);
+        });
+
+        emit statusMessage(
+            QString("BLE streaming — %1").arg(m_device.address().toString()));
+    };
 
     connect(ctl, &QLowEnergyController::connected, [&]() {
         emit statusMessage(
@@ -88,67 +137,51 @@ void BleTransport::run()
     });
 
     connect(ctl, &QLowEnergyController::discoveryFinished, [&]() {
-        svc = ctl->createServiceObject(
-            QBluetoothUuid(QLatin1String(UUID_SERVICE)));
-        if (!svc) {
-            emit error("FFE0 service not found — is this an FNB58?");
+        svcNotify = ctl->createServiceObject(
+            QBluetoothUuid(QLatin1String(UUID_SVC_NOTIFY)));
+        svcWrite  = ctl->createServiceObject(
+            QBluetoothUuid(QLatin1String(UUID_SVC_WRITE)));
+
+        if (!svcNotify || !svcWrite) {
+            emit error(QString("Required BLE services not found (FFE0=%1, FFE5=%2)")
+                       .arg(svcNotify ? "ok" : "missing")
+                       .arg(svcWrite  ? "ok" : "missing"));
             loop.quit();
             return;
         }
 
-        connect(svc, &QLowEnergyService::stateChanged,
-                [&, svc](QLowEnergyService::ServiceState state) {
-            if (state != QLowEnergyService::RemoteServiceDiscovered) return;
-
-            auto notifyChar = svc->characteristic(
-                QBluetoothUuid(QLatin1String(UUID_NOTIFY)));
-            auto writeChar  = svc->characteristic(
-                QBluetoothUuid(QLatin1String(UUID_WRITE)));
-
-            if (!notifyChar.isValid() || !writeChar.isValid()) {
-                emit error("FFE4/FFE9 characteristics not found");
+        auto onState = [&](QLowEnergyService::ServiceState state) {
+            if (state == QLowEnergyService::RemoteServiceDiscovered) {
+                ++discoveredCount;
+                tryStart();
+            } else if (state == QLowEnergyService::InvalidService) {
+                emit error("BLE service detail discovery failed");
                 loop.quit();
-                return;
             }
+        };
 
-            // Enable notifications via Client Characteristic Configuration Descriptor
-            auto cccd = notifyChar.descriptor(
-                QBluetoothUuid::DescriptorType::ClientCharacteristicConfiguration);
-            if (cccd.isValid())
-                svc->writeDescriptor(cccd, QByteArray::fromHex("0100"));
+        connect(svcNotify, &QLowEnergyService::stateChanged, onState);
+        connect(svcWrite,  &QLowEnergyService::stateChanged, onState);
 
-            // Expose write char for sendCommand()
-            {
-                QMutexLocker lk(&m_writeMutex);
-                m_svc       = svc;
-                m_writeChar = writeChar;
-            }
-
-            svc->writeCharacteristic(writeChar, BLE_INIT1,
-                                     QLowEnergyService::WriteWithoutResponse);
-            QTimer::singleShot(2000, [this, svc, writeChar]() mutable {
-                if (!m_stop)
-                    svc->writeCharacteristic(writeChar, BLE_INIT2,
-                                             QLowEnergyService::WriteWithoutResponse);
-            });
-
-            emit statusMessage(
-                QString("BLE streaming — %1").arg(m_device.address().toString()));
-        });
-
-        connect(svc, &QLowEnergyService::characteristicChanged,
+        connect(svcNotify, &QLowEnergyService::characteristicChanged,
                 [&](const QLowEnergyCharacteristic& c, const QByteArray& value) {
             if (c.uuid() == QBluetoothUuid(QLatin1String(UUID_NOTIFY)))
                 parseBlePacket(value);
         });
 
-        connect(svc, &QLowEnergyService::errorOccurred,
+        connect(svcNotify, &QLowEnergyService::errorOccurred,
                 [&](QLowEnergyService::ServiceError e) {
-            emit error(QString("BLE service error %1").arg(static_cast<int>(e)));
+            emit error(QString("BLE notify service error %1").arg(static_cast<int>(e)));
+            loop.quit();
+        });
+        connect(svcWrite, &QLowEnergyService::errorOccurred,
+                [&](QLowEnergyService::ServiceError e) {
+            emit error(QString("BLE write service error %1").arg(static_cast<int>(e)));
             loop.quit();
         });
 
-        svc->discoverDetails();
+        svcNotify->discoverDetails();
+        svcWrite->discoverDetails();
     });
 
     connect(ctl, &QLowEnergyController::errorOccurred,
@@ -183,7 +216,8 @@ void BleTransport::run()
     }
     stopTimer->stop();
     delete stopTimer;
-    if (svc) delete svc;
+    if (svcNotify) delete svcNotify;
+    if (svcWrite && svcWrite != svcNotify) delete svcWrite;
     ctl->disconnectFromDevice();
     delete ctl;
 }
