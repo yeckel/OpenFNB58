@@ -3,7 +3,7 @@ import QtQuick
 import QtQuick.Controls.Material
 import QtQuick.Controls
 import QtQuick.Layouts
-import QtQuick.Dialogs
+import Qt.labs.platform as Platform
 
 ApplicationWindow {
     id: window
@@ -118,39 +118,30 @@ ApplicationWindow {
 
             Item { Layout.fillWidth: true }
 
-            // CSV export
+            // Export (CSV or XLSX — chosen by file filter / extension)
             Button {
-                text: "Export CSV"
+                text: "⬇ Export…"
                 enabled: backend.sampleCount > 0
-                onClicked: csvDialog.open()
-            }
-
-            // XLSX export
-            Button {
-                text: "Export XLSX"
-                enabled: backend.sampleCount > 0
-                onClicked: xlsxDialog.open()
+                onClicked: exportDialog.open()
+                ToolTip.text: "Save data as CSV or Excel"
+                ToolTip.visible: hovered
             }
         }
     }
 
-    // ── File Dialogs ─────────────────────────────────────────────────────
-    FileDialog {
-        id: csvDialog
-        title:         "Export CSV"
-        fileMode:      FileDialog.SaveFile
-        nameFilters:   ["CSV files (*.csv)", "All files (*)"]
-        defaultSuffix: "csv"
-        onAccepted: backend.exportCsv(selectedFile)
-    }
-
-    FileDialog {
-        id: xlsxDialog
-        title:         "Export Excel"
-        fileMode:      FileDialog.SaveFile
-        nameFilters:   ["Excel files (*.xlsx)", "All files (*)"]
-        defaultSuffix: "xlsx"
-        onAccepted: backend.exportExcel(selectedFile)
+    // ── Export File Dialog (native OS dialog via Qt.labs.platform) ────────
+    Platform.FileDialog {
+        id: exportDialog
+        title:         "Export Data"
+        fileMode:      Platform.FileDialog.SaveFile
+        nameFilters:   ["CSV files (*.csv)", "Excel files (*.xlsx)", "All files (*)"]
+        onAccepted: {
+            var path = file.toString()
+            if (path.toLowerCase().endsWith(".xlsx"))
+                backend.exportExcel(file)
+            else
+                backend.exportCsv(file)
+        }
     }
 
     // ── BLE device picker popup ───────────────────────────────────────────

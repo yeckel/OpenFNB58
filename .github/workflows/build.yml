@@ -48,7 +48,7 @@ jobs:
           OUTPUT: OpenFNB58-linux-x86_64.AppImage
           QMAKE: qmake6
           QML_SOURCES_PATHS: ${{ github.workspace }}/app/qml
-          EXTRA_QT_MODULES: "qml;quick;quickcontrols2;quickdialogs2;dbus;bluetooth;connectivity"
+          EXTRA_QT_MODULES: "qml;quick;quickcontrols2;dbus;bluetooth;connectivity;labsplatform"
         run: |
           mkdir -p AppDir/usr/bin AppDir/usr/share/icons/hicolor/256x256/apps
           cp build/bin/fnb58app   AppDir/usr/bin/
