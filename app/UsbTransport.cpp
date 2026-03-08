@@ -1,6 +1,6 @@
 #include "UsbTransport.h"
 
-#include <hidapi/hidapi.h>
+#include <hidapi.h>
 #include <QThread>
 #include <QElapsedTimer>
 #include <QMutexLocker>
