@@ -45,6 +45,8 @@ private:
 
     double m_lastDp = 0, m_lastDn = 0;
     bool   m_hasDp  = false;
+    double m_lastTemp = 0;
+    bool   m_hasTemp  = false;
 
     void parseBlePacket(const QByteArray& data);
 };
