@@ -114,7 +114,7 @@ jobs:
   # ── macOS ─────────────────────────────────────────────────────────────────
   build-macos:
     name: macOS (dmg)
-    runs-on: macos-15
+    runs-on: macos-latest
 
     steps:
       - uses: actions/checkout@v4
