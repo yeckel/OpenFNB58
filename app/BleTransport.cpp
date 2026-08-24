@@ -63,7 +63,10 @@ void BleTransport::parseBlePacket(const QByteArray& chunk)
             emit reading(vbus, ibus, vbus * ibus,
                          m_hasDp ? m_lastDp : nan,
                          m_hasDp ? m_lastDn : nan,
-                         nan);
+                         m_hasTemp ? m_lastTemp : nan);
+        } else if (ptype == 0x05) {
+            m_lastTemp = (p[5] | (uint16_t(p[6]) << 8)) / 10.0;
+            m_hasTemp  = true;
         } else if (ptype == 0x06) {
             m_lastDp = u16(p);
             m_lastDn = u16(p + 2);

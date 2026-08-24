@@ -497,7 +497,7 @@ def _parse_ble_stream(chunk: bytes) -> list[dict]:
     """
     Parse a BLE notification chunk that may contain multiple concatenated packets.
     Each packet: aa [type] [data_len] [data...] [checksum]
-    Returns a list of decoded measurement dicts (only types 0x06 and 0x07).
+    Returns decoded temperature, D+/D-, and VBUS/IBUS measurement dicts.
     """
     results = []
     i = 0
@@ -521,6 +521,9 @@ def _parse_ble_stream(chunk: bytes) -> list[dict]:
             vbus = struct.unpack_from("<H", data, 0)[0] / 1000.0
             ibus = struct.unpack_from("<H", data, 2)[0] / 1000.0
             results.append({"type": "vi", "vbus_V": vbus, "ibus_A": ibus, "power_W": vbus * ibus})
+        elif ptype == 0x05:
+            temp = struct.unpack_from("<H", data, 5)[0] / 10.0
+            results.append({"type": "temp", "temp_C": temp})
         elif ptype == 0x06:
             dp = struct.unpack_from("<H", data, 0)[0] / 1000.0
             dn = struct.unpack_from("<H", data, 2)[0] / 1000.0
@@ -542,7 +545,8 @@ def _ble_require_imports():
 
 def ble_read_once(mac: str) -> dict | None:
     """
-    Start the BLE stream, collect the first VBUS/IBUS + D+/D- readings, return them.
+    Start the BLE stream, collect the first VBUS/IBUS, D+/D-, and temperature
+    readings, then return them.
     """
     dbus, GLib = _ble_require_imports()
     import dbus.mainloop.glib
@@ -562,7 +566,7 @@ def ble_read_once(mac: str) -> dict | None:
             return
         for pkt in _parse_ble_stream(bytes(changed["Value"])):
             result.update(pkt)
-        if "vbus_V" in result and "dp_V" in result:
+        if "vbus_V" in result and "dp_V" in result and "temp_C" in result:
             loop.quit()
 
     bus.add_signal_receiver(on_data,
@@ -599,13 +603,14 @@ def ble_monitor(mac: str, count: int | None = None):
     wi = dbus.Interface(bus.get_object("org.bluez", write_path),  "org.bluez.GattCharacteristic1")
 
     print(f"BLE mode — device {mac}")
-    print(f"{'Time':>10}  {'VBUS':>9}  {'IBUS':>9}  {'Power':>9}  {'D+':>7}  {'D-':>7}")
-    print(f"{'(s)':>10}  {'(V)':>9}  {'(A)':>9}  {'(W)':>9}  {'(V)':>7}  {'(V)':>7}")
-    print("-" * 68)
+    print(f"{'Time':>10}  {'VBUS':>9}  {'IBUS':>9}  {'Power':>9}  {'D+':>7}  {'D-':>7}  {'Temp':>7}")
+    print(f"{'(s)':>10}  {'(V)':>9}  {'(A)':>9}  {'(W)':>9}  {'(V)':>7}  {'(V)':>7}  {'(°C)':>7}")
+    print("-" * 77)
 
     start = time.time()
     n = [0]
     last_dp = [None]
+    last_temp = [None]
     loop = GLib.MainLoop()
 
     def on_data(iface, changed, inv):
@@ -614,13 +619,16 @@ def ble_monitor(mac: str, count: int | None = None):
         for pkt in _parse_ble_stream(bytes(changed["Value"])):
             if pkt["type"] == "dp":
                 last_dp[0] = pkt
+            elif pkt["type"] == "temp":
+                last_temp[0] = pkt["temp_C"]
             elif pkt["type"] == "vi":
                 t = time.time() - start
                 dp = last_dp[0]["dp_V"] if last_dp[0] else float("nan")
                 dn = last_dp[0]["dn_V"] if last_dp[0] else float("nan")
+                temp = last_temp[0] if last_temp[0] is not None else float("nan")
                 print(
                     f"{t:10.2f}  {pkt['vbus_V']:9.3f}  {pkt['ibus_A']:9.3f}"
-                    f"  {pkt['power_W']:9.5f}  {dp:7.3f}  {dn:7.3f}"
+                    f"  {pkt['power_W']:9.5f}  {dp:7.3f}  {dn:7.3f}  {temp:7.1f}"
                 )
                 sys.stdout.flush()
                 n[0] += 1
@@ -713,6 +721,7 @@ def main():
                 print(f"Power    : {s.get('power_W', float('nan')):.5f} W")
                 print(f"D+       : {dp:.3f} V")
                 print(f"D-       : {dn:.3f} V")
+                print(f"Temp     : {s.get('temp_C', float('nan')):.1f} °C")
                 print(f"Protocol : {infer_protocol(dp, dn, vbs)}")
             else:
                 print("No BLE data received.", file=sys.stderr)
