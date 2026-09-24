@@ -24,11 +24,13 @@ static double nowSecs() {
 }
 
 static QString urlToPath(const QString& urlOrPath) {
-    if (urlOrPath.startsWith("file:///"))
-        return urlOrPath.mid(7);       // file:///home/… → /home/…
-    if (urlOrPath.startsWith("file://"))
-        return urlOrPath.mid(7);
-    return urlOrPath;
+    // QML FileDialog hands us a QUrl (e.g. "file:///C:/Users/…/data.csv" on
+    // Windows). The old hand-rolled mid(7) slicing produced "/C:/…" there,
+    // so every export open() failed with STATUS_OBJECT_NAME_NOT_FOUND and the
+    // save silently did nothing. Let QUrl do the conversion instead — correct
+    // on all platforms (returns "" for non-file URLs, guarded below).
+    const QString local = QUrl(urlOrPath).toLocalFile();
+    return local.isEmpty() ? urlOrPath : local;
 }
 
 // ── Constructor / destructor ──────────────────────────────────────────────
