@@ -135,8 +135,15 @@ jobs:
 
       - name: Deploy with macdeployqt
         run: |
-          macdeployqt build/bin/fnb58app.app -qmldir=app/qml -dmg
-          mv build/bin/fnb58app.dmg OpenFNB58-macos.dmg
+          macdeployqt build/bin/fnb58app.app -qmldir=app/qml -hardened-runtime
+
+      - name: Ad-hoc codesign (fixes "app is damaged" from linker-signed bundle)
+        run: |
+          codesign --force --deep --sign - build/bin/fnb58app.app
+          codesign --verify --deep --strict build/bin/fnb58app.app
+
+      - name: Create DMG
+        run: hdiutil create -volname OpenFNB58 -srcfolder build/bin/fnb58app.app -ov -format UDZO OpenFNB58-macos.dmg
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
