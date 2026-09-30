@@ -49,6 +49,7 @@ jobs:
           QMAKE: qmake6
           QML_SOURCES_PATHS: ${{ github.workspace }}/app/qml
           EXTRA_QT_MODULES: "qml;quick;quickcontrols2;dbus;bluetooth;connectivity;labsplatform"
+          UPDATE_INFORMATION: zsync|https://github.com/${{ github.repository }}/releases/latest/download/OpenFNB58-x86_64.AppImage.zsync
         run: |
           mkdir -p AppDir/usr/bin AppDir/usr/share/icons/hicolor/256x256/apps
           cp build/bin/fnb58app   AppDir/usr/bin/
@@ -64,7 +65,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: linux-appimage
-          path: OpenFNB58-x86_64.AppImage
+          path: |
+            OpenFNB58-x86_64.AppImage
+            OpenFNB58-x86_64.AppImage.zsync
 
   # ── Windows ───────────────────────────────────────────────────────────────
   build-windows:
@@ -171,5 +174,6 @@ jobs:
           generate_release_notes: true
           files: |
             OpenFNB58-x86_64.AppImage
+            OpenFNB58-x86_64.AppImage.zsync
             OpenFNB58-windows-x86_64.zip
             OpenFNB58-macos.dmg
