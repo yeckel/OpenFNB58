@@ -32,7 +32,7 @@ Pre-built binaries are attached to each [GitHub Release](https://github.com/yeck
 
 | Platform | File | Notes |
 |----------|------|-------|
-| Linux    | `OpenFNB58-linux-x86_64.AppImage` | `chmod +x`, then run |
+| Linux    | `OpenFNB58-x86_64.AppImage` | `chmod +x`, then run |
 | Windows  | `OpenFNB58-windows-x86_64.zip`    | Unzip and run `fnb58app.exe` |
 | macOS    | `OpenFNB58-macos.dmg`             | Drag to Applications |
 
